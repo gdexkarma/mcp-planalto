@@ -1,1 +1,194 @@
 # mcp-planalto
+
+Servidor [MCP](https://modelcontextprotocol.io) para **pesquisar, ler e mapear a legislação federal brasileira**, sempre na versão mais recente. Ele junta duas fontes oficiais:
+
+| Fonte | O que fornece |
+|---|---|
+| **Planalto** (`planalto.gov.br/ccivil_03`) | Texto compilado e atualizado de cada norma, com as notas "(Redação dada pela Lei nº …)", e os quadros anuais de leis, decretos, MPs, LCs e ECs. |
+| **Senado Federal – Dados Abertos** (`legis.senado.leg.br/dadosabertos`) | Indexação temática (tesauro) de cada norma e o **grafo de alterações**: quais normas alteraram, revogaram ou regulamentaram cada dispositivo. |
+
+Com isso, um assistente (Claude Desktop, Claude Code ou qualquer cliente MCP) consegue:
+
+- ler um artigo exato, na redação vigente ou com o histórico de redações;
+- saber quem alterou um dispositivo e quando;
+- **conferir se o texto compilado do Planalto já incorpora todas as alterações conhecidas**;
+- acompanhar o que foi publicado nos últimos dias, filtrado por tema;
+- **mapear todo o acervo de um tema** (ex.: IRPJ) e exportar para planilha.
+
+> O texto do Planalto não substitui o publicado no Diário Oficial da União.
+
+---
+
+## Ferramentas MCP
+
+| Ferramenta | Para quê |
+|---|---|
+| `ler_norma` | Texto atualizado de uma norma ou de um dispositivo (`"art. 74, § 12"`, `"arts. 15 a 20"`), modo vigente ou histórico, busca por termo dentro da norma, paginação. |
+| `estrutura_norma` | Sumário (livros, títulos, capítulos, seções e os artigos de cada um). Útil em normas grandes (RIR/2018, LC 214/2025, Código Civil). |
+| `consultar_norma` | Ficha: ementa, data, apelido, situação (revogada, convertida, sem eficácia), URN LexML, publicação no DOU, indexação do Senado, nº de normas alteradoras, regulamentos. |
+| `buscar_normas` | Busca no catálogo por ementa, apelido e indexação, sem acento ou caixa. Aceita `"frase exata"`, `OU`, `prefixo*`, filtros de tipo e ano. |
+| `historico_alteracoes` | Normas que alteraram a norma (ou um dispositivo), com as ações (alteração, acréscimo, revogação) e os dispositivos atingidos. Também o caminho inverso: o que a norma alterou. |
+| `verificar_atualizacao` | Cruza as alterações registradas pelo Senado e as normas recentes que citam a norma na ementa com os links e notas do texto do Planalto. Aponta o que pode ainda não estar refletido no compilado. |
+| `novidades_legislativas` | Normas publicadas nos últimos N dias (relê os quadros do Planalto na hora), com filtro por tema. |
+| `mapear_tema` | Acervo completo de um tema, com relevância e motivo de cada norma; exporta `.xlsx` ou `.csv`. |
+| `listar_temas` | Temas pré-configurados (IRPJ, CSLL, PIS/COFINS, IRPF, IRRF, IPI, IOF, SIMPLES, IBS/CBS, preços de transferência, tributação internacional, previdenciárias, processo fiscal, CTN, ICMS/ISS). |
+| `status_indice` / `sincronizar_catalogo` | Estado do catálogo local e atualização em segundo plano. |
+
+As citações são interpretadas como um advogado escreveria: `Lei 9.430/96`, `Lei nº 12.973, de 13 de maio de 2014`, `LC 214/2025`, `Decreto 9.580/2018`, `RIR/2018`, `CTN`, `CF`, `MP 2.158-35/2001`, `DL 1.598/77`, `EC 132/2023`.
+
+---
+
+## Instalação
+
+Requer Python 3.10 ou superior.
+
+```bash
+pip install git+https://github.com/gdexkarma/mcp-planalto
+# ou, sem instalar nada globalmente, com uv:
+uvx --from git+https://github.com/gdexkarma/mcp-planalto mcp-planalto --help
+```
+
+### Claude Code
+
+```bash
+claude mcp add planalto -- uvx --from git+https://github.com/gdexkarma/mcp-planalto mcp-planalto
+```
+
+### Claude Desktop
+
+Em `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "planalto": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/gdexkarma/mcp-planalto", "mcp-planalto"]
+    }
+  }
+}
+```
+
+Se instalou com `pip`, use `"command": "mcp-planalto"` e `"args": []`.
+
+### Servidor HTTP (uso remoto ou por várias pessoas)
+
+```bash
+mcp-planalto servir --http --host 0.0.0.0 --porta 8000   # endpoint em /mcp
+```
+
+---
+
+## Primeira execução e atualização
+
+Na primeira vez que o servidor sobe, ele monta sozinho, em segundo plano, o **catálogo local** a partir dos quadros do Planalto: cerca de 55 mil normas (leis desde 1891, decretos, decretos-leis, MPs, LCs e ECs), em poucos minutos. Enquanto isso, ler e consultar normas já funciona, porque cada norma também pode ser localizada sob demanda.
+
+A cada início, se a última leitura tiver mais de 6 horas, o servidor relê os quadros do ano corrente. `novidades_legislativas` sempre relê na hora.
+
+Para a **busca e o mapeamento temático com cobertura máxima**, baixe também a indexação e as alterações do Senado de cada norma. A primeira carga leva algumas horas e é retomável (pode ser interrompida e continuada):
+
+```bash
+mcp-planalto sincronizar --detalhes                   # leis, LCs, DLs, MPs, ECs
+mcp-planalto sincronizar --detalhes --tipos DEC --desde-ano 2000   # decretos, se quiser
+```
+
+Sem isso o mapeamento temático continua funcionando, porque segue o grafo de alterações a partir das normas-núcleo e baixa sob demanda o que precisa. A busca por indexação é que fica restrita às normas já detalhadas.
+
+Os dados ficam em `~/.mcp-planalto` (catálogo SQLite, cache HTTP e planilhas exportadas).
+
+---
+
+## Mapeamento temático: como funciona
+
+`mapear_tema("IRPJ")` combina três camadas de evidência:
+
+1. **Núcleo**: normas estruturantes do tema (para IRPJ: DL 1.598/77, Leis 8.981/95, 9.249/95, 9.430/96, 9.532/97, 12.973/14, 14.596/23, RIR/2018 etc.). Você pode acrescentar normas com `normas_extras`.
+2. **Grafo de alterações** (Senado): toda norma que alterou, revogou ou regulamentou um dispositivo do núcleo. É isso que pega as leis de ementa genérica, do tipo "Altera a Lei nº 9.430, de 1996, e dá outras providências", que uma busca por palavra-chave perderia. Com `profundidade=2`, segue também quem alterou as principais alteradoras.
+3. **Catálogo**: normas cuja ementa, apelido ou indexação do Senado contém os termos do tema ("lucro real", "lucro presumido", "juros sobre o capital próprio"…). Você pode acrescentar termos com `termos_extras`.
+
+Cada norma recebe uma relevância (soma das evidências, usada só para ordenar), a camada e os motivos de ter entrado. A planilha traz a lista completa, com link para o texto no Planalto e uma aba de notas metodológicas.
+
+Para um tema que não está pré-configurado, passe texto livre e, de preferência, algumas normas-núcleo:
+
+```
+mapear_tema("subvenções para investimento", normas_extras=["Lei 14.789/2023", "Lei 12.973/2014"],
+            termos_extras=['"subvencao para investimento"', '"subvencoes"'])
+```
+
+---
+
+## Linha de comando
+
+Tudo que o servidor faz também está disponível no terminal:
+
+```bash
+mcp-planalto ler "Lei 9.430/96" -d "art. 74, § 12"
+mcp-planalto ler "LC 214/2025" --estrutura
+mcp-planalto ler "DL 1.598/77" -d "art. 12" --historico
+mcp-planalto ler "RIR/2018" -t "juros sobre o capital próprio"
+mcp-planalto ficha "Lei 12.973/2014"
+mcp-planalto historico "Lei 9.430/96" -d "art. 74"
+mcp-planalto verificar "Lei 9.249/95"
+mcp-planalto buscar '"lucro presumido"' --tipos LEI LCP --desde-ano 2010
+mcp-planalto novidades --dias 15 --tema IRPJ
+mcp-planalto mapear IRPJ --formato xlsx
+mcp-planalto temas
+mcp-planalto status
+```
+
+---
+
+## Exemplos de perguntas ao assistente
+
+- "Qual a redação atual do art. 74 da Lei 9.430/96? Quem alterou o § 12 e quando?"
+- "O texto do Planalto da Lei 9.249/95 está atualizado? Confira antes de responder."
+- "O que foi publicado de legislação federal sobre IRPJ e CSLL nos últimos 15 dias?"
+- "Mapeie todo o acervo de legislação de PIS/Cofins desde 2002 e gere a planilha."
+- "Compare a redação original e a atual do art. 12 do DL 1.598/77."
+
+---
+
+## Configuração
+
+| Variável | Padrão | Efeito |
+|---|---|---|
+| `MCP_PLANALTO_HOME` | `~/.mcp-planalto` | Diretório de dados. |
+| `MCP_PLANALTO_CACHE_HORAS` | `24` | Por quanto tempo uma página de texto é reutilizada sem perguntar ao Planalto se mudou (depois disso o servidor revalida com ETag/Last-Modified, o que é barato). |
+| `MCP_PLANALTO_AUTO_SYNC` | `1` | `0` desliga a sincronização automática ao iniciar. |
+
+---
+
+## Limites conhecidos
+
+- **Defasagem do compilado.** O Planalto às vezes leva dias para consolidar uma alteração. Use `verificar_atualizacao`, que aponta as normas alteradoras ainda não refletidas no texto.
+- **A indexação do Senado também tem defasagem.** Normas publicadas há poucos dias podem ainda não ter vides. `verificar_atualizacao` cobre esse intervalo procurando, no catálogo, normas recentes cuja ementa cita a norma.
+- **Escopo.** O servidor cobre leis, LCs, decretos, decretos-leis, MPs, ECs e a Constituição. Instruções Normativas, Soluções de Consulta e demais atos da RFB não estão no Planalto. Decretos não numerados e decretos legislativos ficam de fora.
+- **HTML heterogêneo.** Páginas antigas do Planalto têm marcação irregular. O leitor foi testado em normas de várias épocas (CC/2002, CTN, DL 1.598/77, Lei 9.430/96, LC 214/2025, RIR/2018), mas uma página fora do padrão pode exigir ajuste. Nesse caso, `modo="historico"` mostra o texto bruto com as redações riscadas.
+- **Uso responsável.** O cliente HTTP limita a frequência de requisições por portal e usa cache. Não reduza esses intervalos.
+
+---
+
+## Desenvolvimento
+
+```bash
+pip install -e ".[dev]"
+pytest              # testes offline (fixtures)
+pytest -m live      # testes contra os portais reais
+```
+
+Estrutura:
+
+```
+src/mcp_planalto/
+  server.py              ferramentas MCP
+  servico.py             orquestra catálogo, Planalto e Senado
+  cli.py                 linha de comando
+  db.py                  SQLite + FTS5 (catálogo e grafo de alterações)
+  temas.py               temas tributários pré-configurados
+  referencias.py         interpretação de citações e de dispositivos
+  exportar.py            XLSX/CSV
+  http.py                cache, revalidação, limite de taxa e reintentos
+  fontes/planalto_indices.py   quadros de legislação do Planalto
+  fontes/planalto_texto.py     leitura do texto compilado (vigente × histórico, dispositivos)
+  fontes/senado.py             API de Dados Abertos do Senado
+```

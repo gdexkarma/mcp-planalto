@@ -153,15 +153,20 @@ class Documento:
 
     def buscar(self, termo: str, max_artigos: int = 15) -> tuple[list[Bloco], int]:
         """Artigos inteiros que contêm o termo (sem acento/caixa). Retorna (blocos, nº de artigos)."""
-        alvo = normalizar(termo)
+        alvo = normalizar(termo).strip('"')
         palavras = [p for p in re.split(r"\s+", alvo) if p]
-        arts: list[str] = []
-        for b in self.blocos:
-            if not b.artigo or b.obsoleto:
-                continue
-            t = normalizar(b.vigente)
-            if all(p in t for p in palavras) and b.artigo not in arts:
-                arts.append(b.artigo)
+
+        def achar(cond) -> list[str]:
+            arts: list[str] = []
+            for b in self.blocos:
+                if b.artigo and not b.obsoleto and b.artigo not in arts and cond(normalizar(b.vigente)):
+                    arts.append(b.artigo)
+            return arts
+
+        # primeiro a expressão exata; se não houver, todas as palavras no mesmo parágrafo
+        arts = achar(lambda t: alvo in t)
+        if not arts and len(palavras) > 1 and not termo.strip().startswith('"'):
+            arts = achar(lambda t: all(p in t for p in palavras))
         sel = set(arts[:max_artigos])
         return [b for b in self.blocos if b.artigo in sel], len(arts)
 

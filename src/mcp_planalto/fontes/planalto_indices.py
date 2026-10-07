@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urljoin
 
 from lxml import html as lhtml
@@ -65,6 +65,7 @@ class EntradaIndice:
     url: str | None
     ementa: str
     situacao: str | None = None
+    reedicoes: list[str] = field(default_factory=list)  # MPs anteriores a 2001: edições da família
 
 
 def _limpo(s: str) -> str:
@@ -135,11 +136,24 @@ def ler_quadro(conteudo: str, tipo: str, base_url: str) -> list[EntradaIndice]:
                 a.drop_tree()
         ementa = _limpo(celulas[1].text_content())
         situacao = _limpo(celulas[2].text_content()) if len(celulas) > 2 else None
+        if tipo == "MPV" and (m := re.search(r"\s*(Em Tramita[çc][ãa]o|Revogada|Convertida[^.]*)\.?$", ementa)):
+            ementa = ementa[: m.start()].strip()
+            if not situacao or re.match(r"Origin[áa]ria", situacao):
+                situacao = (situacao + " | " if situacao else "") + m.group(1)
+        reedicoes: list[str] = []
+        if tipo == "MPV" and situacao and re.match(r"Origin[áa]ria", situacao):
+            # "Originária: 1.636 Edições: 1.636-1, ..., 2.189-48" (quadros anteriores à EC 32/2001)
+            for txt in re.findall(r"\d{1,3}(?:\.\d{3})*(?:-\d+)?", situacao):
+                num = txt.replace(".", "").lstrip("0")
+                if num and num not in reedicoes:
+                    reedicoes.append(num)
+            final = situacao.rsplit(" | ", 1)[-1] if " | " in situacao else ""
+            situacao = f"Última reedição de família com {len(reedicoes)} edições anteriores" + (f"; {final}" if final else "")
         chave = f"{numero}:{ano}"
         if chave in vistos:
             continue
         vistos.add(chave)
-        saida.append(EntradaIndice(tipo, numero, ano, data, url, ementa, situacao or None))
+        saida.append(EntradaIndice(tipo, numero, ano, data, url, ementa, situacao or None, reedicoes))
     return saida
 
 
@@ -172,6 +186,15 @@ def _ano_do_rotulo(rotulo: str, url: str) -> tuple[int | None, int | None]:
     return (min(anos), max(anos))
 
 
+def _com_ano(entradas: list[EntradaIndice], a0: int | None, a1: int | None) -> list[EntradaIndice]:
+    """Linhas sem data num quadro de um único ano recebem o ano do quadro."""
+    if a0 and a0 == a1:
+        for e in entradas:
+            if e.ano is None:
+                e.ano = a0
+    return entradas
+
+
 class IndicesPlanalto:
     def __init__(self, http: ClienteHTTP):
         self.http = http
@@ -202,7 +225,7 @@ class IndicesPlanalto:
             if ano_fim and a0 and a0 > ano_fim:
                 continue
             try:
-                out.extend(self.ler(url, tipo, max_idade=max_idade))
+                out.extend(_com_ano(self.ler(url, tipo, max_idade=max_idade), a0, a1))
             except ErroHTTP as e:
                 log.warning("Quadro indisponível (%s): %s", rot, e)
         if ano_inicio or ano_fim:
@@ -220,8 +243,10 @@ class IndicesPlanalto:
             candidatos = [q for q in candidatos if (q[2] is None or q[2] <= ano) and (q[3] is None or q[3] >= ano)] or candidatos
         for _rot, url, _a0, _a1 in candidatos:
             try:
-                for e in self.ler(url, tipo, max_idade=6 * 3600):
+                for e in _com_ano(self.ler(url, tipo, max_idade=6 * 3600), _a0, _a1):
                     if e.numero == numero and (ano is None or e.ano is None or e.ano == ano):
+                        if e.ano is None and ano:
+                            e.ano = ano
                         return e
             except ErroHTTP as e:
                 log.warning("Quadro indisponível: %s", e)

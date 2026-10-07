@@ -7,7 +7,7 @@ import re
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Iterable, Iterator
 
@@ -58,6 +58,9 @@ CREATE TABLE IF NOT EXISTS relacoes (
 CREATE INDEX IF NOT EXISTS ix_rel_destino ON relacoes(destino);
 
 CREATE TABLE IF NOT EXISTS meta (chave TEXT PRIMARY KEY, valor TEXT);
+
+-- Medidas provisórias reeditadas (antes da EC 32/2001): número da edição -> última edição da família
+CREATE TABLE IF NOT EXISTS mp_reedicoes (numero TEXT PRIMARY KEY, chave_final TEXT NOT NULL);
 """
 
 CAMPOS = [
@@ -329,6 +332,23 @@ class Banco:
             "relacoes_de_alteracao": rel,
             "norma_mais_recente": mais_recente,
         }
+
+    # ------------------------------------------------------------ reedições de MP
+    def salvar_reedicoes(self, mapa: dict[str, str]) -> None:
+        with self._escrita, self.conexao() as c:
+            c.executemany("INSERT OR REPLACE INTO mp_reedicoes VALUES (?,?)", list(mapa.items()))
+
+    def familia_mp(self, numero: str) -> str | None:
+        r = self.conexao().execute("SELECT chave_final FROM mp_reedicoes WHERE numero=?", (numero,)).fetchone()
+        return r[0] if r else None
+
+    def senado_id(self, chave: str) -> str | None:
+        r = self.conexao().execute(
+            "SELECT origem_senado_id FROM relacoes WHERE origem=? AND origem_senado_id IS NOT NULL "
+            "UNION SELECT destino_senado_id FROM relacoes WHERE destino=? AND destino_senado_id IS NOT NULL LIMIT 1",
+            (chave, chave),
+        ).fetchone()
+        return r[0] if r else None
 
     # ------------------------------------------------------------ relações
     def salvar_relacoes(self, relacoes: Iterable[Relacao], substituir_de: list[tuple[str, str]] = ()) -> None:

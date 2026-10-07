@@ -90,3 +90,21 @@ def test_quadro():
     assert es[1].url == "https://www.planalto.gov.br/ccivil_03/LEIS/L9430.htm"
     assert es[0].ementa == "Dispõe sobre as diretrizes orçamentárias de 2026."  # sem "Mensagem de veto"
     assert es[2].situacao == "Em vigor"
+
+
+def test_quadro_mp_reeditada():
+    html = """<table><tr><td><a href="../Antigas_2001/2189-49.htm">2.189-49, de 23.8.2001</a></td>
+    <td>Altera a legislação do imposto de renda. Em Tramitação</td>
+    <td>Originária: 1.636 Edições: <a href="1636-1.htm">1.636-1</a>, <a href="2132-46.htm">2.132-46</a></td></tr></table>"""
+    (e,) = ler_quadro(html, "MPV", "https://www.planalto.gov.br/ccivil_03/mpv/Quadro/x.htm")
+    assert e.numero == "2189-49" and e.ementa == "Altera a legislação do imposto de renda."
+    assert e.reedicoes == ["1636", "1636-1", "2132-46"]
+    assert e.situacao.endswith("Em Tramitação")
+
+
+def test_busca_por_expressao_exata():
+    d = _doc()
+    _, n = d.buscar("pessoa jurídica sujeita")
+    assert n == 1
+    _, n = d.buscar('"jurídica pessoa"')  # entre aspas: só a expressão exata
+    assert n == 0

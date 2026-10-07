@@ -32,7 +32,7 @@ from .referencias import (
     normalizar,
     rotulo_dispositivo,
 )
-from .temas import TEMAS, Tema, localizar_tema
+from .temas import Tema, localizar_tema
 
 log = logging.getLogger(__name__)
 
@@ -152,13 +152,18 @@ class Legislacao:
 
     def _salvar_entradas(self, entradas: list[EntradaIndice]) -> int:
         normas = []
+        reedicoes: dict[str, str] = {}
         for e in entradas:
             ref = Referencia(e.tipo, e.numero, e.ano)
+            for r in e.reedicoes:
+                reedicoes[r] = ref.chave
             normas.append(Norma(
                 chave=ref.chave, tipo=e.tipo, numero=e.numero, ano=e.ano, data=e.data, ementa=e.ementa or None,
                 url_planalto=e.url, origem="planalto", atualizado_em=agora(),
                 situacao=e.situacao if e.tipo == "MPV" and e.situacao and e.situacao != "-" else None,
             ))
+        if reedicoes:
+            self.db.salvar_reedicoes(reedicoes)
         return self.db.salvar(normas)
 
     # ================================================================ Senado
@@ -340,7 +345,7 @@ class Legislacao:
             "url": doc.url,
             "planalto_atualizado_em": _data_http(doc.last_modified),
         }
-        pendentes, conferidas = [], 0
+        pendentes, mps_antigas, conferidas = [], [], 0
         ultima = None
         if det:
             por_norma: dict[str, list[Relacao]] = collections.defaultdict(list)
@@ -356,10 +361,16 @@ class Legislacao:
                     or bool(_padrao_citacao(ref).search(texto))
                 conferidas += 1
                 if not citada:
-                    pendentes.append({
+                    item = {
                         "norma": ref.nome, "data": data,
                         "dispositivos": sorted({f"{r.acao}: {r.dispositivo}".strip(": ") for r in rels})[:15],
-                    })
+                    }
+                    provisoria = ref.tipo == "MPV" and all("provis" in normalizar(r.declaracao) for r in rels)
+                    if provisoria and data and data < (dt.date.today() - dt.timedelta(days=180)).isoformat():
+                        # MP antiga: ou caducou, ou foi convertida (e então a lei de conversão é que aparece)
+                        mps_antigas.append(item)
+                    else:
+                        pendentes.append(item)
         else:
             res["aviso_senado"] = "Sem dados do Senado; só foi possível checar normas recentes do catálogo."
         # Normas recentes do catálogo cuja ementa menciona esta norma (o Senado pode ainda não ter indexado)
@@ -380,6 +391,10 @@ class Legislacao:
         res["ultima_alteracao_conhecida"] = ultima
         res["nao_refletidas_no_texto"] = sorted(pendentes, key=lambda p: p["data"] or "", reverse=True)
         res["normas_recentes_que_citam_na_ementa"] = recentes
+        if mps_antigas:
+            res["mps_antigas_nao_citadas"] = mps_antigas
+            res["nota_mps"] = ("Alterações provisórias de MPs com mais de 180 dias não indicam desatualização: "
+                               "a MP caducou (e o texto voltou) ou foi convertida em lei (e a lei aparece no texto).")
         if pendentes or recentes:
             res["conclusao"] = (
                 "ATENÇÃO: há normas que alteram esta e não aparecem no texto do Planalto. "
@@ -387,8 +402,8 @@ class Legislacao:
             )
         else:
             res["conclusao"] = (
-                f"O texto do Planalto menciona todas as {conferidas} normas alteradoras conhecidas "
-                f"de {norma.nome} (sinal de que o compilado está atualizado)."
+                f"O texto do Planalto menciona todas as {conferidas - len(mps_antigas)} normas alteradoras "
+                f"relevantes de {norma.nome} (sinal de que o compilado está atualizado)."
             )
         res["observacao"] = (
             "Checagem heurística: procura cada norma alteradora (Senado) nos links e notas do texto compilado. "
@@ -502,6 +517,7 @@ class Legislacao:
                     normas_extras: list[str] | None = None, tipos: list[str] | None = None,
                     ano_inicio: int | None = None, ano_fim: int | None = None,
                     seguir_alteracoes: bool = True, profundidade: int = 1, limite_busca: int = 400,
+                    agrupar_reedicoes: bool = True,
                     progresso: Callable[[str], None] | None = None) -> dict:
         """Monta o acervo de normas de um tema combinando três fontes de evidência:
 
@@ -601,6 +617,11 @@ class Legislacao:
                 marcar(n.chave, 20 + min(score, 15) * 2, f"ementa/indexação: {termo}")
         aviso(f"Catálogo: {len(achados)} normas")
 
+        # MPs reeditadas (antes de 2001): agrupa a família na última edição
+        if agrupar_reedicoes:
+            achados = self._agrupar_reedicoes(achados)
+        self._completar_metadados(list(achados))
+
         # Montagem
         linhas = []
         for chave, a in achados.items():
@@ -641,6 +662,54 @@ class Legislacao:
                 "normas_com_indexacao_senado": est["normas_com_detalhe_senado"],
             },
         }
+
+    def _agrupar_reedicoes(self, achados: dict[str, dict]) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        for chave, a in achados.items():
+            destino = chave
+            ref = Referencia.de_chave(chave) if chave.startswith("MPV:") else None
+            # Reedições só existiram até a EC 32/2001; depois dela a numeração recomeçou do 1.
+            if ref and ref.ano and (ref.ano < 2001 or (ref.ano == 2001 and int(ref.numero.split("-")[0]) >= 1000)):
+                destino = self.db.familia_mp(ref.numero) or chave
+                if destino == chave and "-" in ref.numero:
+                    # família desconhecida: agrupa pelo número-base (ex.: 2.132-41 ... 2.132-46)
+                    base = ref.numero.split("-")[0]
+                    irmas = [k for k in achados if k.startswith(f"MPV:{base}-")]
+                    destino = max(irmas, key=lambda k: int(k.split(":")[1].split("-")[1]))
+            g = out.setdefault(destino, {"pontos": 0.0, "motivos": [], "edicoes": set()})
+            g["pontos"] = max(g["pontos"], a["pontos"])
+            for m in a["motivos"]:
+                if m not in g["motivos"]:
+                    g["motivos"].append(m)
+            if destino != chave:
+                g["edicoes"].add(Referencia.de_chave(chave).nome)
+        for g in out.values():
+            if g["edicoes"]:
+                g["motivos"].append(f"agrupa {len(g['edicoes'])} reedição(ões) anteriores")
+        return out
+
+    def _completar_metadados(self, chaves: list[str], maximo: int = 80) -> None:
+        """Busca no Senado ementa e data de normas que não estão no catálogo do Planalto."""
+        faltam = []
+        for k in chaves:
+            n = self.db.obter(k)
+            if not n or not n.ementa:
+                sid = self.db.senado_id(k)
+                if sid:
+                    faltam.append(sid)
+        if not faltam:
+            return
+
+        def um(sid):
+            try:
+                return self.senado.detalhe_por_id(sid, max_idade=30 * 24 * 3600)
+            except ErroHTTP:
+                return None
+
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            for det in ex.map(um, faltam[:maximo]):
+                if det:
+                    self._gravar_detalhe(det)
 
     def _norma_de_chave(self, chave: str) -> Norma | None:
         try:
