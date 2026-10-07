@@ -1,0 +1,27 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<DetalheDocumento><documentos><documento id="551306">
+<identificacao><tipo>LEI-n</tipo><descricao>Lei Numerada</descricao><numero>9430</numero><norma>LEI-9430-1996-12-27</norma>
+<normaNome>Lei nº 9.430 de 27/12/1996</normaNome><dataassinatura>27/12/1996</dataassinatura>
+<apelido>LEI-9430-1996-12-27 , Lei do Ajuste Tributário (1996)</apelido>
+<urlDocumento>https://normas.leg.br/?urn=urn:lex:br:federal:lei:1996-12-27;9430</urlDocumento></identificacao>
+<publicacoes><publicacao><dispositivo>Publicação Original   [Diário Oficial da União  de 30/12/1996] (p. 28805, col. 1)</dispositivo></publicacao></publicacoes>
+<vides>
+<vide><codnormaposterior>575000</codnormaposterior><datAssinatura>13/05/2014</datAssinatura><nomeNormaPosterior>Lei nº 12.973 de 13/05/2014</nomeNormaPosterior>
+<comentario>Declaração de Alteração Permanente</comentario><itens><item><dispositivo>Art. 2, caput</dispositivo><comentario>Alteração</comentario></item>
+<item><dispositivo>Art. 74, § 12, Inciso 2, Alínea f</dispositivo><comentario>Alteração</comentario></item></itens></vide>
+<vide><codnormaposterior>44076339</codnormaposterior><datAssinatura>28/09/2026</datAssinatura><nomeNormaPosterior>Lei nº 15.525 de 28/09/2026</nomeNormaPosterior>
+<comentario>Declaração de Alteração Permanente</comentario><itens><item><dispositivo>Art. 2, § 5</dispositivo><comentario>Acréscimo</comentario></item></itens></vide>
+<vide><codnormaposterior>1</codnormaposterior><datAssinatura>10/01/2020</datAssinatura><nomeNormaPosterior>Decreto de 10/01/2020</nomeNormaPosterior>
+<comentario>Declaração de Regulamentação</comentario><itens><item><dispositivo>Art. 3</dispositivo><comentario>Regulamentado</comentario></item></itens></vide>
+<vide><codnormaposterior>2</codnormaposterior><datAssinatura>11/01/2021</datAssinatura><nomeNormaPosterior>Lei nº 14.000 de 11/01/2021</nomeNormaPosterior>
+<comentario>Declaração de Veto Original</comentario><itens><item><dispositivo>Art. 9</dispositivo><comentario>Alteração Vetada</comentario></item></itens></vide>
+</vides>
+<edivs><ediv><codnormaAnterior>546354</codnormaAnterior><datAssinatura>30/11/1964</datAssinatura><nomeNormaAnterior>Lei nº 4.502 de 30/11/1964</nomeNormaAnterior>
+<comentario>Declaração de Alteração Permanente</comentario><itens><item><dispositivo>Art. 35</dispositivo><comentario>Alteração</comentario></item></itens></ediv>
+<ediv><codnormaAnterior>604119</codnormaAnterior><datAssinatura>05/10/1988</datAssinatura><nomeNormaAnterior>Ato das Disposições Constitucionais Transitórias</nomeNormaAnterior>
+<comentario>Declaração de Legislação Correlata</comentario><itens><item><dispositivo>Art. 76</dispositivo><comentario>Dispositivo Correlato</comentario></item></itens></ediv></edivs>
+<disps><disp><nomeDispositivo>Art. 2 [Lei nº 9.430 de 27/12/1996]</nomeDispositivo><refs><ref><dispositivo>Lei nº 12.973 de 13/05/2014</dispositivo><comentario>Alteração (Declaração de Alteração Permanente)</comentario></ref></refs></disp></disps>
+<ementa>Dispõe sobre a legislação tributária federal, as contribuições para a seguridade social, o processo administrativo de consulta e dá outras providências.</ementa>
+<catalogo><frase>TRIBUTOS .</frase></catalogo>
+<indexacao><frase>IMPOSTO DE RENDA ,  PESSOA JURIDICA ,  LUCRO REAL .</frase><frase>CONTRIBUIÇÃO SOCIAL ,  LUCRO LIQUIDO .</frase></indexacao>
+</documento></documentos></DetalheDocumento>

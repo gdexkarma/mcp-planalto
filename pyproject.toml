@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-planalto"
+version = "0.1.0"
+description = "Servidor MCP para pesquisar, ler e mapear a legislação federal brasileira (Planalto + Senado Federal)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["mcp", "legislação", "planalto", "direito tributário", "lexml", "senado"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Natural Language :: Portuguese (Brazilian)",
+    "Topic :: Office/Business",
+]
+dependencies = [
+    "mcp>=1.2",
+    "lxml>=5.0",
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+mcp-planalto = "mcp_planalto.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_planalto"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["live: testes que acessam a internet (rode com -m live)"]
+addopts = "-m 'not live'"
