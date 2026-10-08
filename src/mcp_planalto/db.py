@@ -132,6 +132,18 @@ def _texto_fts(s: str | None) -> str:
     return s or ""
 
 
+def radical_flexao(p: str) -> str | None:
+    """Radical que cobre gênero e número de palavras longas: tributaria -> tributari, transacao -> transac.
+    Siglas e palavras curtas ficam como estão (None)."""
+    if len(p) < 7 or not p.isalpha():
+        return None
+    if re.search(r"c(?:ao|oes)$", p):
+        return re.sub(r"(?:ao|oes)$", "", p)
+    if re.search(r"[ao]s?$", p):
+        return re.sub(r"[ao]s?$", "", p)
+    return None
+
+
 def consulta_fts(texto: str) -> str:
     """Converte texto livre em expressão FTS5 segura.
 
@@ -157,12 +169,20 @@ def consulta_fts(texto: str) -> str:
         if tok.upper() in ("AND", "E", "NOT", "NEAR"):
             continue
         prefixo = tok.endswith("*")
+        if re.fullmatch(r"\w+(?:/\w+)+\*?", tok):  # "IRPJ/CSLL", "SUDENE/SUDAM" -> alternativas
+            alts = [p for p in re.findall(r"\w+", normalizar(tok)) if len(p) > 1 or p.isdigit()]
+            if alts:
+                grupos[-1].append("(" + " OR ".join(f'"{a}"' for a in alts) + ")")
+            continue
         palavras = [p for p in re.findall(r"[\w]+", normalizar(tok)) if len(p) > 1 or p.isdigit()]
         if not palavras:
             continue
         if len(palavras) == 1:
-            grupos[-1].append(f'"{palavras[0]}"' + ("*" if prefixo else ""))
-        else:  # "IRPJ/CSLL", "lucro-real" -> frase
+            p = palavras[0]
+            if not prefixo and tok.lower() == tok and (radical := radical_flexao(p)):
+                p, prefixo = radical, True  # "tributária" casa "tributário"; "transação", "transações"
+            grupos[-1].append(f'"{p}"' + ("*" if prefixo else ""))
+        else:  # "lucro-real" -> frase
             grupos[-1].append('"' + " ".join(palavras) + '"')
     partes = ["(" + " AND ".join(g) + ")" for g in grupos if g]
     return " OR ".join(partes)
@@ -232,7 +252,7 @@ class Banco:
         if ref.ano:
             sql += " AND ano=?"
             args.append(ref.ano)
-        sql += " ORDER BY ano DESC, numero DESC"
+        sql += " ORDER BY ano DESC, CAST(numero AS INTEGER) DESC, numero DESC"
         return [self._linha(r) for r in self.conexao().execute(sql, args)]
 
     def salvar(self, normas: Iterable[Norma], sobrescrever_vazios: bool = False,
@@ -311,10 +331,17 @@ class Banco:
             where = " AND ".join(["normas_fts MATCH ?"] + filtros)
             base = f"FROM normas_fts f JOIN normas n ON n.rowid = f.rowid WHERE {where}"
             total = c.execute(f"SELECT count(*) {base}", [expr] + args).fetchone()[0]
+            # várias palavras soltas ("lucro presumido"): quem tem a frase exata vem primeiro
+            palavras = re.findall(r"\w+", normalizar(consulta))
+            frase = None
+            if len(palavras) >= 2 and not re.search(r'["*/|]|\b(?:OU|OR)\b', consulta):
+                frase = '"' + " ".join(palavras) + '"'
+            ordem_frase = ("(n.rowid IN (SELECT rowid FROM normas_fts WHERE normas_fts MATCH ?)) DESC, "
+                           if frase else "")
             rows = c.execute(
                 f"SELECT n.*, bm25(normas_fts, 0, 2.0, 1.0, 3.0, 1.5) AS score {base} "
-                "ORDER BY score, n.data DESC LIMIT ? OFFSET ?",
-                [expr] + args + [limite, deslocamento],
+                f"ORDER BY {ordem_frase}score, n.data DESC LIMIT ? OFFSET ?",
+                [expr] + args + ([frase] if frase else []) + [limite, deslocamento],
             ).fetchall()
             return [(self._linha(r), -r["score"]) for r in rows], total
         where = (" WHERE " + " AND ".join(filtros)) if filtros else ""
@@ -345,7 +372,8 @@ class Banco:
             args.append(ano_inicio)
         if sem_detalhe:
             sql += " AND detalhe_em IS NULL"
-        sql += " ORDER BY ano DESC, numero DESC"
+        # numero é texto ("9430", "2158-35"): ordena pelo valor numérico para o --limite pegar as mais recentes
+        sql += " ORDER BY ano DESC, CAST(numero AS INTEGER) DESC, numero DESC"
         for r in self.conexao().execute(sql, args).fetchall():
             yield self._linha(r)
 

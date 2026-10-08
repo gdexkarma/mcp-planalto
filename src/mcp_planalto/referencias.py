@@ -306,7 +306,7 @@ def interpretar_citacao(texto: str) -> tuple[Referencia, str | None]:
     disp = None
     m_antes = re.match(r"(.*?(?:\b(?:arts?|artigos?|paragrafos?|incisos?|alineas?|caput)\b|§).*?)\s*,?\s*"
                        r"(d[aoe]s?|n[ao]s?)?\s*$", antes)
-    m_depois = re.match(r"\s*(?:\([^)]*\)\s*)?[(:\-–,]?\s*(?:em seu\s+|no\s+)?(?=arts?\b|artigos?\b|§)", depois)
+    m_depois = re.match(r"\s*(?:\([^)]*\)\s*)?[(:\-–,]?\s*(?:em seu\s+|no\s+)?(?=arts?\b|artigos?\b|§|exceto\s+arts?\b)", depois)
     if m_antes and re.search(r"\bart|§|paragrafo|inciso|alinea", antes):
         disp = m_antes.group(1).strip(" ,")
     elif m_depois:

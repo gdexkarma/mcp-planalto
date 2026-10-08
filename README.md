@@ -23,12 +23,12 @@ Com isso, um assistente (Claude Desktop, Claude Code ou qualquer cliente MCP) co
 
 | Ferramenta | Para quê |
 |---|---|
-| `ler_norma` | Texto atualizado de uma norma ou de um dispositivo (`"art. 74, § 12"`, `"arts. 15 a 20"`, `"§ 1º do art. 44"`, `"art. 44, caput"`, `"art. 76 do ADCT"`, `"anexo I"`), modo vigente ou histórico, busca por termo dentro da norma (inclusive anexos), paginação. |
+| `ler_norma` | Texto atualizado de uma norma ou de um dispositivo (`"art. 74, § 12"`, `"arts. 15 a 20"`, `"§ 1º do art. 44"`, `"art. 44, caput"`, `"art. 76 do ADCT"`, `"anexo I"`), modo vigente ou histórico, busca por termo dentro da norma (inclusive anexos), paginação. Ao ler um dispositivo, traz as notas de vigência do cabeçalho da norma e um **alerta** quando o Senado registra alteração recente daquele dispositivo que o texto ainda não mostra. |
 | `estrutura_norma` | Sumário (livros, títulos, capítulos, seções e os artigos de cada um). Útil em normas grandes (RIR/2018, LC 214/2025, Código Civil). |
 | `consultar_norma` | Ficha: ementa, data, apelido, situação (revogada, convertida, sem eficácia), URN LexML, publicação no DOU, indexação do Senado, nº de normas alteradoras, regulamentos. |
-| `buscar_normas` | Busca no catálogo por ementa, apelido e indexação, sem acento ou caixa. Aceita `"frase exata"`, `OU`, `prefixo*`, filtros de tipo e ano. |
-| `historico_alteracoes` | Normas que alteraram a norma (ou um dispositivo), com as ações (alteração, acréscimo, revogação) e os dispositivos atingidos. Também o caminho inverso: o que a norma alterou. |
-| `verificar_atualizacao` | Para cada norma alteradora registrada pelo Senado, procura a nota "(Redação dada/Incluído/Revogado pela …)" no próprio dispositivo alterado e confere se acréscimos existem e revogações aparecem. Também olha normas recentes cuja ementa diz alterar esta. Separa o que falta no texto, o que só aparece no cabeçalho (vigência futura) e MPs antigas. |
+| `buscar_normas` | Busca no catálogo por ementa, apelido e indexação, sem acento, caixa ou flexão ("tributária" acha "tributário"). Aceita `"frase exata"`, `OU`, `A/B` (um ou outro), `prefixo*`, filtros de tipo e ano; a frase exata vem primeiro; siglas como IRRF e IRPJ são expandidas. |
+| `historico_alteracoes` | Normas que alteraram a norma (ou um dispositivo, inclusive do ADCT), com as ações (alteração, acréscimo, revogação) e os dispositivos atingidos. Ressalvas, regulamentações e conversões vêm à parte; reedições de MP, agrupadas. Também o caminho inverso: o que a norma alterou. |
+| `verificar_atualizacao` | Para cada norma alteradora registrada pelo Senado, procura, artigo por artigo, a nota "(Redação dada/Incluído/Revogado pela …)" no dispositivo alterado; confere se acréscimos existem (e não são homônimos incluídos por outra lei) e se revogações aparecem. Também procura leis dos últimos ~13 meses cuja ementa diz alterar esta. Separa o que falta no texto (ATENÇÃO), o que está a conferir (só em "Vide", incorporação parcial, vigência futura) e MPs encerradas. |
 | `novidades_legislativas` | Normas publicadas nos últimos N dias (relê os quadros do Planalto na hora), com filtro por tema. |
 | `mapear_tema` | Acervo completo de um tema, com relevância e motivo de cada norma; exporta `.xlsx` ou `.csv`. |
 | `listar_temas` | Temas pré-configurados (IRPJ, CSLL, PIS/COFINS, IRPF, IRRF, IPI, IOF, SIMPLES, IBS/CBS, preços de transferência, tributação internacional, previdenciárias, processo fiscal, CTN, ICMS/ISS). |
@@ -105,7 +105,7 @@ mcp-planalto sincronizar --detalhes --tipos DEC --desde-ano 2000   # decretos, s
 
 | Precisa do `--detalhes` | Funciona sem ele |
 |---|---|
-| `buscar_normas` por assunto (sem ele, "lucro real" acha 12 normas; "IRRF" e "transação tributária", nenhuma) | `ler_norma`, `estrutura_norma` |
+| `buscar_normas` por assunto mais completo (sem ele, a busca só vê ementa e apelido; com ele, também os descritores do Senado) | `ler_norma`, `estrutura_norma` |
 | camada "relacionada" do `mapear_tema` e contagens por tema | `consultar_norma`, `historico_alteracoes`, `verificar_atualizacao` (buscam no Senado só a norma consultada, na hora) |
 | `novidades_legislativas` com tema rápido (sem ele, até 60 consultas ao Senado por chamada, ~30 s) | camada "alteradora" do `mapear_tema` (consulta só as normas-núcleo) |
 
@@ -133,10 +133,10 @@ Os dados ficam em `~/.mcp-planalto` (ou em `MCP_PLANALTO_HOME`): catálogo SQLit
 `mapear_tema("IRPJ")` combina três camadas de evidência:
 
 1. **Núcleo**: normas estruturantes do tema (para IRPJ: DL 1.598/77, Leis 8.981/95, 9.249/95, 9.430/96, 9.532/97, 12.973/14, 14.596/23, RIR/2018 etc.). Você pode acrescentar normas com `normas_extras`. Normas que tratam de vários assuntos entram com **escopo por dispositivo**, por exemplo `"Lei 9.430/1996, arts. 18 a 24-C"` para preços de transferência; só alterações nesses artigos contam para o tema.
-2. **Grafo de alterações** (Senado): toda norma que alterou, revogou ou regulamentou um dispositivo do núcleo. É isso que pega as leis de ementa genérica, do tipo "Altera a Lei nº 9.430, de 1996, e dá outras providências", que uma busca por palavra-chave perderia. Com `profundidade=2`, segue também quem alterou as principais alteradoras.
+2. **Grafo de alterações** (Senado): toda norma que alterou, revogou ou regulamentou um dispositivo do núcleo. É isso que pega as leis de ementa genérica, do tipo "Altera a Lei nº 9.430, de 1996, e dá outras providências", que uma busca por palavra-chave perderia. Com `profundidade=2`, segue também quem alterou as principais alteradoras, mas só fica quem tem termos do tema na ementa ou na indexação (as alteradoras costumam ser leis de vários assuntos). Com escopo por dispositivo, só contam alterações em artigos do escopo; registros do Senado sem dispositivo legível ficam de fora, salvo revogação da norma inteira ou regulamento cuja ementa cite artigo do escopo.
 3. **Catálogo**: normas cuja ementa, apelido ou indexação do Senado contém os termos do tema ("lucro real", "lucro presumido", "juros sobre o capital próprio"…). Você pode acrescentar termos com `termos_extras`.
 
-Cada norma recebe uma camada (núcleo, alteradora/regulamentadora, relacionada e, com `profundidade=2`, alteradora de 2º nível), uma relevância (soma das evidências, usada só para ordenar dentro da camada) e os motivos de ter entrado. Reedições de MP anteriores a 2001 são agrupadas na última edição, e MPs convertidas aparecem dentro da lei de conversão. Temas podem ser combinados (`"IRPJ/CSLL"`). A planilha traz a lista completa, com link para o texto no Planalto e uma aba de notas metodológicas.
+Cada norma recebe uma camada (núcleo, alteradora/regulamentadora, relacionada e, com `profundidade=2`, alteradora de 2º nível), uma relevância (soma das evidências, com o melhor termo do catálogo contando uma vez; usada só para ordenar dentro da camada) e os motivos de ter entrado. Reedições de MP anteriores a 2001 são agrupadas na última edição, e MPs convertidas aparecem dentro da lei de conversão. Temas podem ser combinados (`"IRPJ/CSLL"`). A planilha traz a lista completa, com link para o texto no Planalto e uma aba de notas metodológicas.
 
 Para um tema que não está pré-configurado, passe texto livre e, de preferência, algumas normas-núcleo:
 

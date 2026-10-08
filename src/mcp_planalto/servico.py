@@ -18,7 +18,7 @@ from email.utils import parsedate_to_datetime
 from typing import Callable
 
 from .config import Config
-from .db import Banco, Norma, Relacao, agora
+from .db import Banco, Norma, Relacao, agora, radical_flexao
 from .fontes.planalto_indices import EntradaIndice, IndicesPlanalto
 from .fontes.planalto_texto import Documento, ler_documento
 from .fontes.senado import DetalheSenado, Senado
@@ -260,6 +260,38 @@ def _incluido_por_outra(blocos, ref: Referencia) -> bool:
     """O dispositivo traz "(Incluído pela Lei X)" e X não é `ref`: é homônimo de outro acréscimo."""
     notas = [m.group(1) for b in blocos[:1] for m in _RE_INCLUIDO.finditer(b.completo)]
     return bool(notas) and not any(cita_norma(n, ref) for n in notas)
+
+
+def _relacao_no_escopo(r: Relacao, esc: Callable[[str], bool] | None, ementa_origem: str | None = None) -> bool:
+    """A relação atinge o escopo do tema? Sem escopo, sempre. Com escopo, só se o dispositivo for legível e
+    estiver dentro; sem dispositivo, só revogação/perda de eficácia da norma inteira ou regulamentação cuja
+    ementa cite um artigo do escopo ("Regulamenta o art. 24-C da Lei ...")."""
+    if esc is None:
+        return True
+    k = chave_dispositivo(r.dispositivo) if r.dispositivo else ()
+    if k:
+        return esc(k[0][1])
+    if _decl_forte(r):
+        return True
+    if classificar_relacao(r) == "regulamenta" and ementa_origem:
+        arts = re.findall(r"\bart(?:igo)?s?\.?\s*(\d+(?:\s*-\s*[a-z])?)", normalizar(ementa_origem))
+        return any(esc(re.sub(r"[\s-]", "", a)) for a in arts)
+    return False
+
+
+# siglas que quase nunca aparecem por extenso em ementas e indexação
+_SINONIMOS_SIGLA = {
+    "irrf": 'IRRF OU "retido na fonte" OU "imposto de renda na fonte" OU "incidente na fonte" OU '
+            '"retencao na fonte" "imposto"',
+    "irpj": 'IRPJ OU "imposto de renda" "pessoa juridica" OU "imposto sobre a renda" "pessoa juridica" OU '
+            '"imposto de renda" "pessoas juridicas" OU "imposto sobre a renda das pessoas juridicas"',
+    "irpf": 'IRPF OU "imposto de renda" "pessoa fisica" OU "imposto sobre a renda" "pessoa fisica" OU '
+            '"imposto de renda" "pessoas fisicas"',
+    "csll": 'CSLL OU "contribuicao social sobre o lucro"',
+    "iof": 'IOF OU "imposto sobre operacoes financeiras" OU "imposto sobre operacoes de credito"',
+    "ipi": 'IPI OU "imposto sobre produtos industrializados"',
+    "cprb": 'CPRB OU "contribuicao previdenciaria sobre a receita bruta"',
+}
 
 
 def _familia(chave: str) -> str:
@@ -917,21 +949,26 @@ class Legislacao:
         _validar_anos(ano_inicio, ano_fim)
         limite = max(1, min(int(limite), 100))
         pagina = max(1, int(pagina))
-        res, total = self.db.buscar(consulta, tipos, ano_inicio, ano_fim, limite, (pagina - 1) * limite)
+        expandida = _SINONIMOS_SIGLA.get(normalizar(consulta).strip())
+        res, total = self.db.buscar(expandida or consulta, tipos, ano_inicio, ano_fim, limite, (pagina - 1) * limite)
         resultados = [n.resumo() for n, _ in res]
         # a consulta é uma citação ("Lei 9.430/96", "RIR")? põe a norma citada no topo
         if pagina == 1:
             try:
                 ref = interpretar(consulta)
                 if ref.ano or ref.tipo == "CF":
-                    n = self.db.obter(ref.chave)
-                    if n and n.chave not in {r["chave"] for r in resultados}:
+                    citadas = [self.db.obter(ref.chave)]
+                else:  # "LC 214" sem ano: todas as normas com esse número
+                    citadas = self.db.candidatos(ref)[:5]
+                for n in reversed([c for c in citadas if c]):
+                    if n.chave not in {r["chave"] for r in resultados}:
                         resultados.insert(0, n.resumo())
                         total += 1
             except ValueError:
                 pass
         out = {
             "consulta": consulta,
+            **({"consulta_expandida": expandida} if expandida else {}),
             "total": total,
             "pagina": pagina,
             "total_paginas": max(1, math.ceil(total / limite)),
@@ -973,7 +1010,11 @@ class Legislacao:
     def novidades(self, desde: str | None = None, dias: int = 30, tipos: list[str] | None = None,
                   tema: str | None = None, termos: list[str] | None = None, limite: int = 100) -> dict:
         desde = ler_data(desde, "desde")
-        dias = max(1, min(int(dias), 3660))
+        if int(dias) < 1:
+            raise ValueError("dias deve ser 1 ou mais.")
+        dias = min(int(dias), 3660)
+        if desde and desde > hoje().isoformat():
+            raise ValueError(f"A data 'desde' ({desde}) está no futuro.")
         if not desde:
             desde = (hoje() - dt.timedelta(days=dias)).isoformat()
         tipos = normalizar_tipos(tipos)
@@ -1028,48 +1069,62 @@ class Legislacao:
                 except ValueError:
                     pass
 
-        def motivo_local(n: Norma) -> str | None:
-            texto = normalizar(" ".join(x for x in (n.ementa, n.apelido, n.indexacao) if x))
+        def motivo_termos(n: Norma, indexacao: str | None = None) -> str | None:
+            texto = normalizar(" ".join(x for x in (n.ementa, n.apelido, n.indexacao, indexacao) if x))
             for c, rx in exprs:
                 if rx(texto):
                     return f"ementa/indexação contém {c}"
-            if n.chave in nucleo:
-                return "norma-núcleo do tema"
-            for k in nucleo:
+            return None
+
+        def motivo_ementa(n: Norma) -> str | None:
+            """Só quando o Senado ainda não registrou as alterações da norma."""
+            for k, esc in nucleo.items():
                 if _ementa_altera(n.ementa or "", Referencia.de_chave(k)):
-                    return f"ementa diz alterar {self._nome(k)}"
+                    if esc is None:
+                        return f"ementa diz alterar {self._nome(k)}"
+                    return (f"ementa diz alterar {self._nome(k)} (o Senado ainda não detalhou quais dispositivos: "
+                            "confira se atinge a parte da norma ligada ao tema)")
             return None
 
         def motivo_relacoes(rels: list[Relacao]) -> str | None:
             alvos = set()
             for r in rels:
-                if r.destino in nucleo and classificar_relacao(r) == "altera":
-                    esc = nucleo[r.destino]
-                    k = chave_dispositivo(r.dispositivo) if r.dispositivo else ()
-                    if esc is None or not k or esc(k[0][1]):
-                        alvos.add(r.destino)
+                if r.destino in nucleo and classificar_relacao(r) == "altera" and \
+                        _relacao_no_escopo(r, nucleo[r.destino]):
+                    alvos.add(r.destino)
             return ("altera " + ", ".join(sorted(self._nome(a) for a in alvos))) if alvos else None
 
         def filtrar(normas: list[Norma]) -> tuple[list[tuple[Norma, str]], int]:
             achados: dict[str, str] = {}
             consultar = []
             for n in normas:
-                m = motivo_local(n)
+                m = motivo_termos(n)
                 if m:
                     achados[n.chave] = m
                     continue
                 if not nucleo:
                     continue
+                if n.chave in nucleo:
+                    achados[n.chave] = "norma-núcleo do tema"
+                    continue
                 rels = self.db.relacoes(origem=n.chave)
-                if rels or (n.detalhe_em and time.time() - n.detalhe_em < 7 * 24 * 3600):
-                    m = motivo_relacoes(rels)
-                    if m:
-                        achados[n.chave] = m
+                if rels:
+                    m = motivo_relacoes(rels)  # o Senado já detalhou: decide por ele (escopo, vetos)
+                elif n.detalhe_em and time.time() - n.detalhe_em < 7 * 24 * 3600:
+                    m = motivo_ementa(n)
                 elif n.tipo in ("LEI", "LCP", "MPV", "DEL", "EMC") or (
                         n.tipo == "DEC" and re.search(r"tribut|imposto|contribuic|aliquota|incidencia",
                                                       normalizar(n.ementa or ""))):
                     consultar.append(n)
+                    continue
+                else:
+                    m = None
+                if m:
+                    achados[n.chave] = m
             sobra = max(0, len(consultar) - max_consultas)
+            for n in consultar[max_consultas:]:
+                if m := motivo_ementa(n):
+                    achados[n.chave] = m
             with ThreadPoolExecutor(max_workers=4) as ex:
                 futuros = {ex.submit(self._buscar_detalhe, n.ref, 7 * 24 * 3600, False): n
                            for n in consultar[:max_consultas]}
@@ -1078,11 +1133,13 @@ class Legislacao:
                     try:
                         det, _ = fut.result()
                     except Exception:
-                        continue
-                    if det:
-                        m = motivo_relacoes(det.relacoes_feitas)
-                        if m:
-                            achados[n.chave] = m
+                        det = None
+                    if det and det.relacoes_feitas:
+                        m = motivo_relacoes(det.relacoes_feitas) or motivo_termos(n, det.norma.indexacao)
+                    else:
+                        m = (motivo_termos(n, det.norma.indexacao) if det else None) or motivo_ementa(n)
+                    if m:
+                        achados[n.chave] = m
             return [(n, achados[n.chave]) for n in normas if n.chave in achados], sobra
 
         return filtrar
@@ -1158,10 +1215,10 @@ class Legislacao:
                             continue
                         por_origem: dict[str, list[Relacao]] = collections.defaultdict(list)
                         for r in det.relacoes_recebidas:
-                            if esc is not None and r.dispositivo:
-                                k = chave_dispositivo(r.dispositivo)
-                                if k and not esc(k[0][1]):
-                                    continue  # alteração fora do escopo do tema
+                            if esc is not None:
+                                o = self.db.obter(r.origem) if not r.dispositivo else None
+                                if not _relacao_no_escopo(r, esc, o.ementa if o else None):
+                                    continue  # alteração fora do escopo do tema (ou sem dispositivo legível)
                             por_origem[r.origem].append(r)
                         for origem, rels in por_origem.items():
                             classes = collections.Counter(classificar_relacao(r) for r in rels)
@@ -1201,7 +1258,9 @@ class Legislacao:
                 if not fronteira:
                     break
 
-        # 3. catálogo (ementa, apelido, indexação)
+        # 3. catálogo (ementa, apelido, indexação). Vale o melhor termo, não a soma: sinônimos do nome do
+        # imposto ("imposto de renda" / "imposto sobre a renda") não podem inflar a mesma norma.
+        por_termo: dict[str, tuple[float, list[str]]] = {}
         for termo in termos:
             try:
                 res, total = self.db.buscar(termo, tipos, ano_inicio, ano_fim, limite_busca)
@@ -1213,7 +1272,10 @@ class Legislacao:
             for n, score in res:
                 if _ementa_orcamentaria(n.ementa):
                     continue
-                marcar(n.chave, 20 + min(score, 15) * 2, f"ementa/indexação: {termo}", "relacionada")
+                pts, mots = por_termo.get(n.chave, (0.0, []))
+                por_termo[n.chave] = (max(pts, 20 + min(score, 15) * 2), mots + [termo])
+        for chave, (pts, mots) in por_termo.items():
+            marcar(chave, pts, "ementa/indexação: " + ", ".join(mots[:4]), "relacionada")
         aviso_p(f"Catálogo: {len(achados)} normas")
 
         for chave, motivos in extras_fracas.items():
@@ -1229,10 +1291,18 @@ class Legislacao:
         # Montagem
         ordem_camada = {"núcleo": 0, "alteradora/regulamentadora": 1, "relacionada": 2, "alteradora de 2º nível": 3}
         linhas = []
+        regex_termos = [_consulta_regex(t) for t in termos]
+        descartadas_2o = 0
         for chave, a in achados.items():
             n = self.db.obter(chave) or self._norma_de_chave(chave)
             if not n:
                 continue
+            if a["camadas"] == {"alteradora de 2º nível"}:
+                # 2º nível só com evidência do tema: as alteradoras de 1º nível são leis de vários assuntos
+                texto = normalizar(" ".join(x for x in (n.ementa, n.apelido, n.indexacao) if x))
+                if not any(rx(texto) for rx in regex_termos):
+                    descartadas_2o += 1
+                    continue
             camada = min(a["camadas"], key=lambda c: ordem_camada[c])
             if camada != "núcleo":
                 if tipos and n.tipo not in tipos:
@@ -1252,6 +1322,9 @@ class Legislacao:
         linhas.sort(key=lambda x: (ordem_camada[x["camada"]], -x["relevancia"], x["data"] or ""))
         for i, l in enumerate(linhas, 1):
             l["posicao"] = i
+        if descartadas_2o:
+            avisos.append(f"{descartadas_2o} normas de 2º nível ficaram de fora por não terem termos do tema na "
+                          "ementa/indexação (alteram leis de vários assuntos).")
         est = self.db.estatisticas()
         if not linhas:
             avisos.append("Nenhuma norma encontrada. Para temas livres, informe normas_extras (normas-núcleo) e "
@@ -1488,9 +1561,14 @@ _STOPWORDS = {"de", "da", "do", "das", "dos", "e", "a", "o", "as", "os", "para",
 def _termo_livre(tema: str) -> str:
     """Tema livre vira busca por radicais, sem palavras vazias:
     "subvenções para investimento" -> "subvenc* investim*" (casa subvenção/subvenções, investimento/investimentos)."""
-    palavras = [p for p in re.findall(r"[\w/]+", normalizar(tema)) if p not in _STOPWORDS]
-    radicais = [(p[: max(5, len(p) - 3)] + "*") if len(p) >= 7 and p.isalpha() else p for p in palavras]
-    return " ".join(radicais)
+    alternativas = []
+    for parte in re.split(r"\s+/\s+|\s+ou\s+|\s*;\s*", normalizar(tema)):  # "Pilar 2 / tributação mínima"
+        palavras = [p for p in re.findall(r"[\w/]+", parte) if p not in _STOPWORDS and p != "/"]
+        # só palavras longas viram radical: "reporto" truncado casaria "repor", "reportagem"
+        radicais = [(p[: max(6, len(p) - 3)] + "*") if len(p) >= 9 and p.isalpha() else p for p in palavras]
+        if radicais:
+            alternativas.append(" ".join(radicais))
+    return " OU ".join(alternativas)
 
 
 def _ementa_orcamentaria(ementa: str | None) -> bool:
@@ -1518,15 +1596,23 @@ def _ementa_altera(ementa: str, ref: Referencia) -> bool:
 def _consulta_regex(consulta: str) -> Callable[[str], bool]:
     """Avalia uma consulta no formato do buscador (aspas, OU, prefixo*) sobre texto normalizado,
     respeitando fronteira de palavra ("PIS" não casa "piso")."""
-    grupos: list[list[str]] = [[]]
+    grupos: list[list[re.Pattern]] = [[]]
     for m in re.finditer(r'"([^"]+)"|(\S+)', consulta):
-        if m.group(2) and m.group(2).upper() in ("OU", "OR", "|"):
+        tok = m.group(2)
+        if tok and tok.upper() in ("OU", "OR", "|"):
             grupos.append([])
             continue
-        bruto = normalizar(m.group(1) or m.group(2))
+        bruto = normalizar(m.group(1) or tok)
         prefixo = bruto.endswith("*")
         termo = bruto.rstrip("*")
-        if termo:
-            grupos[-1].append((termo, prefixo))
-    pads = [[re.compile(r"\b" + re.escape(t) + ("" if p else r"\b")) for t, p in g] for g in grupos if g]
+        if not termo:
+            continue
+        if tok and re.fullmatch(r"\w+(?:/\w+)+", termo):  # mesma regra do buscador: "IRPJ/CSLL" = um ou outro
+            alts = "|".join(re.escape(a) for a in termo.split("/"))
+            grupos[-1].append(re.compile(rf"\b(?:{alts})" + ("" if prefixo else r"\b")))
+            continue
+        if tok and not prefixo and tok.lower() == tok and (radical := radical_flexao(termo)):
+            termo, prefixo = radical, True
+        grupos[-1].append(re.compile(r"\b" + re.escape(termo) + ("" if prefixo else r"\b")))
+    pads = [g for g in grupos if g]
     return lambda texto: any(all(p.search(texto) for p in g) for g in pads)

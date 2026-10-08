@@ -63,7 +63,8 @@ def test_busca_sem_acento(L):
 
 
 def test_consulta_fts_segura():
-    assert consulta_fts('lucro "real" OU IRPJ/CSLL') == '("lucro" AND "real") OR ("irpj csll")'
+    assert consulta_fts('lucro "real" OU IRPJ/CSLL') == '("lucro" AND "real") OR (("irpj" OR "csll"))'
+    assert consulta_fts("transação tributária") == '("transac"* AND "tributari"*)'
     assert consulta_fts("tribut*") == '("tribut"*)'
     assert consulta_fts('"') == ""
 
