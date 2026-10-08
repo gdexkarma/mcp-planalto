@@ -72,10 +72,15 @@ def _limpo(s: str) -> str:
     return re.sub(r"\s+", " ", s.replace("\xa0", " ")).strip()
 
 
-def _data(texto: str) -> str | None:
+def _data(texto: str, ano_max: int | None = None) -> str | None:
+    """Data "27.12.96" ou "27 de dezembro de 1996". Anos de 2 dígitos usam o intervalo do quadro
+    (num quadro de 1901-1929, "20" é 1920, não 2020)."""
     m = _RE_DATA.search(texto)
     if m:
-        d, mth, a = int(m.group(1)), int(m.group(2)), ano_completo(int(m.group(3)))
+        d, mth, bruto = int(m.group(1)), int(m.group(2)), m.group(3)
+        a = ano_completo(int(bruto))
+        if len(bruto) == 2 and ano_max and a > ano_max:
+            a -= 100
     else:
         m = _RE_DATA_EXTENSO.search(texto)
         if not m or m.group(2).lower() not in _MESES:
@@ -85,6 +90,25 @@ def _data(texto: str) -> str | None:
         return dt.date(a, mth, d).isoformat()
     except ValueError:
         return None
+
+
+def _numero_do_arquivo(url: str | None) -> int | None:
+    if not url:
+        return None
+    nome = url.rsplit("/", 1)[-1]
+    m = re.search(r"(\d+)", nome)
+    return int(m.group(1)) if m else None
+
+
+_RE_LIXO_EMENTA = re.compile(
+    r"\s*(Mensagem de [Vv]eto( (total|parcial))?|Vide texto compilado|Texto compilado|\((Vide|Ver)\b[^)]*\)|"
+    r"Regulamento|Vig[êe]ncia)\s*(?=$|\s(Mensagem|Vide|Texto|\())"
+)
+_RE_SITUACAO_MP = re.compile(
+    r"(?<=[.;)])\s*((Em Tramita[çc][ãa]o|Convertid[ao]|Revogad[ao]|Rejeitad[ao]|Sem efic[áa]cia|Prejudicad[ao]|"
+    r"Perdeu|Vig[êe]ncia encerrada|Encerrad[ao])\b.*)$",
+    re.I,
+)
 
 
 def _link_texto(celula, base_url: str) -> str | None:
@@ -100,8 +124,9 @@ def _link_texto(celula, base_url: str) -> str | None:
     return None
 
 
-def ler_quadro(conteudo: str, tipo: str, base_url: str) -> list[EntradaIndice]:
-    """Extrai as normas de um quadro do Planalto."""
+def ler_quadro(conteudo: str, tipo: str, base_url: str, ano_ini: int | None = None,
+               ano_fim: int | None = None) -> list[EntradaIndice]:
+    """Extrai as normas de um quadro do Planalto (ano_ini/ano_fim: anos cobertos pelo quadro)."""
     doc = lhtml.fromstring(conteudo)
     saida: list[EntradaIndice] = []
     vistos: set[str] = set()
@@ -112,8 +137,10 @@ def ler_quadro(conteudo: str, tipo: str, base_url: str) -> list[EntradaIndice]:
         primeira = _limpo(celulas[0].text_content())
         if not primeira or primeira.lower().startswith(("nº", "n°", "número", "ano")):
             continue
-        # Primeira célula: "Lei nº 15.321, de 31.12.2025 Publicada no DOU..." ou "9.430, de 27.12.96"
-        cab = re.split(r"public", primeira, flags=re.I)[0]
+        # Primeira célula: "Lei nº 15.321, de 31.12.2025 Publicada no DOU..." ou "9.430, de 27.12.96".
+        # Há números quebrados por tags: "8.2 53 , de 31 .10.91".
+        partes = re.split(r"public", primeira, maxsplit=1, flags=re.I)
+        cab = re.sub(r"(?<=[\d.])\s+(?=[\d.])", "", partes[0])
         cab_sem_tipo = re.sub(
             r"^(lei complementar|lei delegada|lei|decreto[- ]lei|decreto|medida provis[óo]ria|emenda constitucional)\s*",
             "", cab, flags=re.I,
@@ -127,30 +154,50 @@ def ler_quadro(conteudo: str, tipo: str, base_url: str) -> list[EntradaIndice]:
             numero += reed
         elif reed:  # lei/decreto com letra (raro): 1.234-A
             numero += reed.upper()
-        data = _data(cab)
+        data = _data(cab, ano_fim)
         ano = int(data[:4]) if data else None
+        if ano is None and len(partes) > 1:
+            # sem data de assinatura legível: usa o ano da publicação no DOU, se couber no quadro
+            pub = _data(partes[1], ano_fim)
+            if pub and (not ano_ini or int(pub[:4]) >= ano_ini) and (not ano_fim or int(pub[:4]) <= ano_fim):
+                ano = int(pub[:4])
+        if ano is None and ano_ini and ano_ini == ano_fim:
+            ano = ano_ini
         url = _link_texto(celulas[0], base_url) or _link_texto(celulas[1], base_url)
-        for a in list(celulas[1].iter("a")):  # links de mensagem de veto/exposição de motivos
+        n_arq = _numero_do_arquivo(url)
+        base_num = int(re.match(r"\d+", numero).group(0))
+        if url and n_arq is not None and n_arq != base_num and tipo != "CF":
+            log.info("Quadro %s: link de %s %s aponta para outro número (%s); link descartado", base_url, tipo,
+                     numero, url)
+            url = None
+        for a in list(celulas[1].iter("a")):  # links de mensagem de veto/exposição de motivos/compilado
             h = (a.get("href") or "").lower()
-            if re.search(r"/msg/|vep|mensagem|/exm/|\.pdf$", h) or re.match(r"\s*mensagem", a.text_content(), re.I):
+            if re.search(r"/msg/|vep|mensagem|/exm/|\.pdf$|compilad", h) or \
+                    re.match(r"\s*(mensagem|vide|texto compilado)", a.text_content(), re.I):
                 a.drop_tree()
         ementa = _limpo(celulas[1].text_content())
+        for _ in range(3):
+            ementa = _RE_LIXO_EMENTA.sub("", ementa).strip()
         situacao = _limpo(celulas[2].text_content()) if len(celulas) > 2 else None
-        if tipo == "MPV" and (m := re.search(r"\s*(Em Tramita[çc][ãa]o|Revogada|Convertida[^.]*)\.?$", ementa)):
-            ementa = ementa[: m.start()].strip()
+        if tipo == "MPV" and (ms := _RE_SITUACAO_MP.search(ementa)):
+            ementa = ementa[: ms.start()].strip()
             if not situacao or re.match(r"Origin[áa]ria", situacao):
-                situacao = (situacao + " | " if situacao else "") + m.group(1)
+                situacao = (situacao + " | " if situacao else "") + ms.group(1)
         reedicoes: list[str] = []
-        if tipo == "MPV" and situacao and re.match(r"Origin[áa]ria", situacao):
-            # "Originária: 1.636 Edições: 1.636-1, ..., 2.189-48" (quadros anteriores à EC 32/2001)
-            for txt in re.findall(r"\d{1,3}(?:\.\d{3})*(?:-\d+)?", situacao):
-                num = txt.replace(".", "").lstrip("0")
-                if num and num not in reedicoes:
-                    reedicoes.append(num)
+        if tipo == "MPV" and len(celulas) > 2 and situacao and re.match(r"Origin[áa]ria", situacao):
+            # "Originária: 1.636 Edições: 1.636-1, ..., 2.189-48" (quadros anteriores à EC 32/2001).
+            # Só os links contam: o texto pode citar "Del nº 2.474, 1988 - Transformado em MPV nº 2".
+            for a in celulas[2].iter("a"):
+                txt = _limpo(a.text_content())
+                if re.fullmatch(r"\d{1,3}(?:\.\d{3})*(?:-\d+)?", txt):
+                    num = txt.replace(".", "").lstrip("0")
+                    if num and num != numero and num not in reedicoes:
+                        reedicoes.append(num)
             final = situacao.rsplit(" | ", 1)[-1] if " | " in situacao else ""
             situacao = f"Última reedição de família com {len(reedicoes)} edições anteriores" + (f"; {final}" if final else "")
         chave = f"{numero}:{ano}"
         if chave in vistos:
+            log.info("Quadro %s: linha repetida %s %s descartada", base_url, tipo, chave)
             continue
         vistos.add(chave)
         saida.append(EntradaIndice(tipo, numero, ano, data, url, ementa, situacao or None, reedicoes))
@@ -178,21 +225,21 @@ def links_quadros(conteudo: str, tipo: str, base_url: str) -> list[tuple[str, st
 
 def _ano_do_rotulo(rotulo: str, url: str) -> tuple[int | None, int | None]:
     """Intervalo de anos coberto por um quadro, a partir do rótulo ou da URL."""
-    anos = [int(a) for a in re.findall(r"(?<!\d)(1[89]\d\d|20\d\d)(?!\d)", rotulo + " " + url)]
+    rx = r"(?<!\d)(1[89]\d\d|20\d\d)(?!\d)"
+    anos_rot = [int(a) for a in re.findall(rx, rotulo)]
     if "anterior" in (rotulo + url).lower():
+        anos = anos_rot or [int(a) for a in re.findall(rx, url)]
         return (None, max(anos) if anos else None)
-    if not anos:
-        return (None, None)
-    return (min(anos), max(anos))
-
-
-def _com_ano(entradas: list[EntradaIndice], a0: int | None, a1: int | None) -> list[EntradaIndice]:
-    """Linhas sem data num quadro de um único ano recebem o ano do quadro."""
-    if a0 and a0 == a1:
-        for e in entradas:
-            if e.ano is None:
-                e.ano = a0
-    return entradas
+    if anos_rot:
+        return (min(anos_rot), max(anos_rot))
+    # URL: a pasta do ano ("/_ato2019-2022/2021/lei/") é mais específica que a do mandato
+    m = re.search(r"/(1[89]\d\d|20\d\d)/", url)
+    if m:
+        return (int(m.group(1)), int(m.group(1)))
+    anos = [int(a) for a in re.findall(rx, url)]
+    if re.search(r"_?(leis|decretos|quadro)[-_]?(\d{4})\.htm", url, re.I) and anos:
+        return (anos[-1], anos[-1])
+    return (min(anos), max(anos)) if anos else (None, None)
 
 
 class IndicesPlanalto:
@@ -212,9 +259,10 @@ class IndicesPlanalto:
             out.append((rot, url, a0, a1))
         return out
 
-    def ler(self, url: str, tipo: str, max_idade: float | None = 0) -> list[EntradaIndice]:
+    def ler(self, url: str, tipo: str, max_idade: float | None = 0, ano_ini: int | None = None,
+            ano_fim: int | None = None) -> list[EntradaIndice]:
         r = self.http.get(url, max_idade=max_idade)
-        return ler_quadro(r.texto(), tipo, r.url)
+        return ler_quadro(r.texto(), tipo, r.url, ano_ini, ano_fim)
 
     def entradas(self, tipo: str, ano_inicio: int | None = None, ano_fim: int | None = None,
                  max_idade: float | None = 0) -> list[EntradaIndice]:
@@ -225,7 +273,7 @@ class IndicesPlanalto:
             if ano_fim and a0 and a0 > ano_fim:
                 continue
             try:
-                out.extend(_com_ano(self.ler(url, tipo, max_idade=max_idade), a0, a1))
+                out.extend(self.ler(url, tipo, max_idade=max_idade, ano_ini=a0, ano_fim=a1))
             except ErroHTTP as e:
                 log.warning("Quadro indisponível (%s): %s", rot, e)
         if ano_inicio or ano_fim:
@@ -243,10 +291,10 @@ class IndicesPlanalto:
             candidatos = [q for q in candidatos if (q[2] is None or q[2] <= ano) and (q[3] is None or q[3] >= ano)] or candidatos
         for _rot, url, _a0, _a1 in candidatos:
             try:
-                for e in _com_ano(self.ler(url, tipo, max_idade=6 * 3600), _a0, _a1):
-                    if e.numero == numero and (ano is None or e.ano is None or e.ano == ano):
-                        if e.ano is None and ano:
-                            e.ano = ano
+                for e in self.ler(url, tipo, max_idade=6 * 3600, ano_ini=_a0, ano_fim=_a1):
+                    # Linha sem ano só serve quando o pedido também não tem ano: nunca se imputa o ano
+                    # pedido a uma linha (isso criava normas inexistentes, como "Lei 41/1950").
+                    if e.numero == numero and (e.ano == ano or ano is None):
                         return e
             except ErroHTTP as e:
                 log.warning("Quadro indisponível: %s", e)

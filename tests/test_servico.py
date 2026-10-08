@@ -9,7 +9,11 @@ from mcp_planalto.config import Config
 from mcp_planalto.db import Norma, consulta_fts
 from mcp_planalto.exportar import exportar
 from mcp_planalto.http import ErroHTTP, Resposta
-from mcp_planalto.servico import Legislacao, paginar
+from mcp_planalto.db import Relacao
+from mcp_planalto.referencias import Referencia
+from mcp_planalto.servico import (
+    Legislacao, _consulta_regex, _ementa_altera, cita_norma, classificar_relacao, ler_data, normalizar_tipos, paginar,
+)
 
 FIX = Path(__file__).parent / "fixtures"
 URL_LEI = "https://www.planalto.gov.br/ccivil_03/leis/l9430.htm"
@@ -126,5 +130,77 @@ def test_exportar(tmp_path):
 
 
 def test_paginar():
-    p = paginar("\n".join(f"linha {i}" for i in range(100)), 100, 3)
+    p = paginar("\n".join(f"linha {i:04d} " + "x" * 40 for i in range(100)), 500, 3)
     assert p.pagina == 3 and p.total_paginas > 3 and p.texto.startswith("linha")
+
+
+def test_classificar_relacao():
+    R = lambda d, a="": Relacao("A", "B", d, a)  # noqa: E731
+    assert classificar_relacao(R("Declaração de Alteração Permanente", "Alteração")) == "altera"
+    assert classificar_relacao(R("Declaração de Alteração Permanente", "")) == "altera"  # sem itens
+    assert classificar_relacao(R("Declaração de Revogação Permanente da Norma no Todo")) == "altera"
+    assert classificar_relacao(R("Declaração de Alteração Permanente", "Alteração Vetada")) == "vetada"
+    assert classificar_relacao(R("Declaração de Legislação Correlata", "Dispositivo Correlato")) == "correlata"
+    assert classificar_relacao(R("Declaração de Alteração Permanente", "Ressalva")) == "ressalva"
+    assert classificar_relacao(R("Declaração de Regulamentação", "Regulamentado")) == "regulamenta"
+
+
+def test_cita_norma():
+    lei = Referencia("LEI", "9430", 1996)
+    assert cita_norma("(Redação dada pela Lei nº 9.430, de 1996)", lei)
+    assert cita_norma("Lei n o 9.430, de 27 de dezembro de 1996", lei)
+    assert cita_norma("altera as Leis nºs 9.249, de 1995, e 9.430, de 1996", lei)
+    assert not cita_norma("Decreto-Lei nº 9.430", lei)
+    assert not cita_norma("Lei Complementar nº 9.430", lei)
+    assert cita_norma("Decreto-Lei nº 2.848, de 1940", Referencia("DEL", "2848", 1940))
+    assert not cita_norma("Decreto-Lei nº 2.848, de 1940", Referencia("LEI", "2848", 1956))
+
+
+def test_ementa_altera():
+    lei = Referencia("LEI", "12855", 2013)
+    assert _ementa_altera("Altera a Lei nº 12.855, de 2 de setembro de 2013.", lei)
+    assert not _ementa_altera("Altera o Decreto nº 8.000, que regulamenta a Lei nº 12.855, de 2013.", lei)
+
+
+def test_consulta_regex_fronteira():
+    pis = _consulta_regex("PIS")
+    assert pis("contribuicao para o pis") and not pis("piso salarial") and not pis("piscicultura")
+    assert _consulta_regex("tribut*")("tributacao")
+    assert not _consulta_regex('"lucro real"')("lucro realizado")
+
+
+def test_validacoes():
+    assert ler_data("01/09/2026") == "2026-09-01" and ler_data("2026-09-01") == "2026-09-01"
+    with pytest.raises(ValueError):
+        ler_data("ontem")
+    assert normalizar_tipos(["LC", "mp", "DL", "EC"]) == ["LCP", "MPV", "DEL", "EMC"]
+    with pytest.raises(ValueError):
+        normalizar_tipos(["XYZ"])
+
+
+def test_historico_inclui_revogacao_da_norma_inteira(L):
+    L.db.salvar_relacoes([Relacao("DEC:9580:2018", "LEI:9430:1996",
+                                  "Declaração de Revogação Permanente da Norma no Todo", "", "", "2018-11-22")])
+    L._detalhes.clear()
+    det = L._detalhe_do_banco("LEI:9430:1996")
+    assert any(r.origem == "DEC:9580:2018" for r in det.relacoes_recebidas)
+
+
+def test_busca_vazia_nao_devolve_catalogo(L):
+    for q in ["OR", "*", '"', "§"]:
+        assert L.buscar(q)["total"] == 0
+    r = L.buscar("Lei 9.430/96")
+    assert r["resultados"][0]["chave"] == "LEI:9430:1996"
+
+
+def test_mapear_nucleo_duplicado(L):
+    r = L.mapear_tema("teste", normas_extras=["Lei 9.430/1996", "Lei 9.430/96"])
+    assert [n["chave"] for n in r["normas"]].count("LEI:9430:1996") == 1
+    assert r["normas"][0]["relevancia"] == 100
+
+
+def test_mapear_escopo_por_dispositivo(L):
+    r = L.mapear_tema("teste", normas_extras=["Lei 9.430/1996, art. 74"])
+    chaves = {n["chave"] for n in r["normas"]}
+    assert "LEI:12973:2014" in chaves  # alterou o art. 74
+    assert "LEI:15525:2026" not in chaves  # só alterou o art. 2º

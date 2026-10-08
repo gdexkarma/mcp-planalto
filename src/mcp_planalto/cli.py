@@ -97,6 +97,7 @@ def main(argv: list[str] | None = None) -> None:
 
     logging.basicConfig(level=logging.INFO if a.verboso else logging.WARNING,
                         format="%(levelname)s %(message)s", stream=sys.stderr)
+    from .http import ErroHTTP
     from .servico import Legislacao, NormaNaoEncontrada
 
     L = Legislacao()
@@ -145,7 +146,10 @@ def main(argv: list[str] | None = None) -> None:
                 print(f"{t.sigla:26} {t.nome}")
         elif a.cmd == "status":
             _imprimir(L.status())
-    except (NormaNaoEncontrada, ValueError) as e:
+    except ErroHTTP as e:
+        print(f"Erro: portal indisponível ({e}). Tente novamente em alguns minutos.", file=sys.stderr)
+        sys.exit(2)
+    except (NormaNaoEncontrada, ValueError, RuntimeError) as e:
         print(f"Erro: {e}", file=sys.stderr)
         for c in getattr(e, "candidatos", []):
             print(f"  - {c.nome} ({c.data}): {(c.ementa or '')[:90]}", file=sys.stderr)

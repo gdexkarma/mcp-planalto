@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import re
+import secrets
 from pathlib import Path
 
 from .referencias import normalizar
@@ -13,7 +14,7 @@ COLUNAS_MAPA = [
     ("posicao", "#", 6),
     ("norma", "Norma", 34),
     ("data", "Data", 12),
-    ("camada", "Camada", 24),
+    ("camada", "Camada", 26),
     ("relevancia", "Relevância", 11),
     ("ementa", "Ementa", 80),
     ("apelido", "Apelido", 30),
@@ -38,7 +39,7 @@ def exportar(linhas: list[dict], destino_dir: Path, nome: str, formato: str = "x
              notas: list[str] | None = None) -> Path:
     colunas = colunas or COLUNAS_MAPA
     destino_dir.mkdir(parents=True, exist_ok=True)
-    carimbo = dt.datetime.now().strftime("%Y%m%d-%H%M")
+    carimbo = dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
     caminho = destino_dir / f"{_slug(nome)}-{carimbo}.{formato}"
     if formato == "csv":
         with caminho.open("w", newline="", encoding="utf-8-sig") as f:

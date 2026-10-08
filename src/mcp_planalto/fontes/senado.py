@@ -24,6 +24,7 @@ from ..referencias import Referencia, interpretar
 log = logging.getLogger(__name__)
 
 BASE = "https://legis.senado.leg.br/dadosabertos/legislacao"
+ID_CF = "579494"  # código da Constituição de 1988 na base do Senado (a URL CON/1988/1988 não funciona)
 
 # Sigla do Senado (antes do hífen) -> tipo interno
 _TIPO_SENADO = {
@@ -84,25 +85,48 @@ class DetalheSenado:
 
 
 def _situacao(vides: list[etree._Element]) -> str | None:
+    """Situação da norma a partir das declarações do Senado.
+
+    Declarações permanentes prevalecem. Revogação "provisória" (feita por MP) não torna a norma
+    revogada: se a MP caducar, a norma volta a valer; só é informada se nada mais houver.
+    """
+    permanentes, provisorias = [], []
     for v in vides:
         dec = _txt(v, "comentario").lower()
         nome = _txt(v, "nomeNormaPosterior")
-        if "revogação" in dec and "no todo" in dec:
-            return f"Revogada ({nome})"
-        if "conversão em lei" in dec:
-            return f"Convertida em lei ({nome})"
-        if "perda de eficácia" in dec and "no todo" in dec or "caducidade" in dec or "rejeição" in dec:
-            return f"Sem eficácia ({nome})" if nome else "Sem eficácia"
-        if "vigência encerrada" in dec:
-            return f"Vigência encerrada ({nome})" if nome else "Vigência encerrada"
+        rotulo = None
+        if "revogação" in dec and "no todo" in dec and "retirada" not in dec:
+            rotulo = f"Revogada ({nome})"
+        elif "conversão em lei" in dec:
+            rotulo = f"Convertida em lei ({nome})"
+        elif ("perda de eficácia" in dec and "no todo" in dec) or "caducidade" in dec or "rejeição" in dec:
+            rotulo = f"Sem eficácia ({nome})" if nome else "Sem eficácia"
+        elif "vigência encerrada" in dec:
+            rotulo = f"Vigência encerrada ({nome})" if nome else "Vigência encerrada"
+        if not rotulo:
+            continue
+        (provisorias if "provis" in dec else permanentes).append((_data_br(_txt(v, "datAssinatura")) or "", rotulo))
+    if permanentes:
+        return max(permanentes)[1]  # a mais recente
+    if provisorias:
+        data, rotulo = max(provisorias)
+        return rotulo.replace("Revogada (", "Revogação provisória por MP, conferir se a MP foi convertida (")
     return None
 
 
-def ler_detalhe(xml: bytes) -> DetalheSenado | None:
+def ler_detalhe(xml: bytes, numero: str | None = None) -> DetalheSenado | None:
+    """`numero`: quando a resposta traz várias edições (MPs reeditadas), escolhe a pedida ("2158-35")."""
     raiz = etree.fromstring(xml)
-    d = raiz.find(".//documento")
-    if d is None:
+    docs = raiz.findall(".//documento")
+    if not docs:
         return None
+    d = docs[0]
+    if numero and len(docs) > 1:
+        for cand in docs:
+            r = ref_de_nome(_txt(cand, "identificacao/normaNome"))
+            if r and r.numero == numero:
+                d = cand
+                break
     ident = d.find("identificacao")
     tipo_s = _txt(ident, "tipo").split("-")[0]
     tipo = _TIPO_SENADO.get(tipo_s)
@@ -203,15 +227,18 @@ class Senado:
             raise
 
     def detalhe(self, ref: Referencia, max_idade: float | None = 24 * 3600) -> DetalheSenado | None:
+        if ref.tipo == "CF":
+            return self.detalhe_por_id(ID_CF, max_idade)
         if not ref.ano:
             raise ValueError("O Senado exige o ano da norma.")
-        sigla = {"CF": "CON"}.get(ref.tipo, ref.tipo)
-        numero = ref.numero
-        url = f"{BASE}/{sigla}/{quote(numero)}/{ref.ano}"
+        # MPs reeditadas: a API só aceita o número-base e devolve todas as edições do ano
+        base = ref.numero.split("-")[0] if ref.tipo == "MPV" and re.fullmatch(r"\d+-\d+", ref.numero) else ref.numero
+        url = f"{BASE}/{ref.tipo}/{quote(base)}/{ref.ano}"
         xml = self._get(url, max_idade)
         if not xml or b"<documento" not in xml:
+            self.http.esquecer(url)  # norma ainda não indexada: não guardar a resposta vazia
             return None
-        return ler_detalhe(xml)
+        return ler_detalhe(xml, ref.numero)
 
     def detalhe_por_id(self, codigo: str, max_idade: float | None = 24 * 3600) -> DetalheSenado | None:
         xml = self._get(f"{BASE}/{quote(codigo)}", max_idade)

@@ -95,7 +95,8 @@ def test_quadro():
 def test_quadro_mp_reeditada():
     html = """<table><tr><td><a href="../Antigas_2001/2189-49.htm">2.189-49, de 23.8.2001</a></td>
     <td>Altera a legislação do imposto de renda. Em Tramitação</td>
-    <td>Originária: 1.636 Edições: <a href="1636-1.htm">1.636-1</a>, <a href="2132-46.htm">2.132-46</a></td></tr></table>"""
+    <td>Originária: <a href="1636.htm">1.636</a> (Del nº 2.474, 1988) Edições: <a href="1636-1.htm">1.636-1</a>,
+    <a href="2132-46.htm">2.132-46</a></td></tr></table>"""
     (e,) = ler_quadro(html, "MPV", "https://www.planalto.gov.br/ccivil_03/mpv/Quadro/x.htm")
     assert e.numero == "2189-49" and e.ementa == "Altera a legislação do imposto de renda."
     assert e.reedicoes == ["1636", "1636-1", "2132-46"]
@@ -108,3 +109,19 @@ def test_busca_por_expressao_exata():
     assert n == 1
     _, n = d.buscar('"jurídica pessoa"')  # entre aspas: só a expressão exata
     assert n == 0
+
+
+def test_quadro_anos_e_links():
+    html = """<table>
+    <tr><td><a href="L4230.htm">4.230, de 31.12.20</a></td><td>Orça a Receita.</td></tr>
+    <tr><td><a href="L1.htm">2, de 1º.2.46</a></td><td>Link errado no quadro.</td></tr>
+    <tr><td><a href="L41.htm">41, de 16 6.1935</a> Publicada no DOU de 20.6.1935</td><td>Sem data legível.</td></tr>
+    </table>"""
+    es = {e.numero: e for e in ler_quadro(html, "LEI", "https://www.planalto.gov.br/ccivil_03/leis/q.htm", 1901, 1946)}
+    assert es["4230"].ano == 1920  # ano de 2 dígitos dentro do intervalo do quadro
+    html91 = """<table><tr><td><a href="L8253.htm">8.2 53 , de 31 .10.91</a></td>
+    <td>Dispõe sobre X. Vide texto compilado</td></tr></table>"""
+    (e,) = ler_quadro(html91, "LEI", "https://www.planalto.gov.br/ccivil_03/leis/quadro/1991.htm", 1991, 1991)
+    assert (e.numero, e.ano, e.ementa) == ("8253", 1991, "Dispõe sobre X.")
+    assert es["2"].url is None  # link aponta para a Lei 1: descartado
+    assert es["41"].ano == 1935  # ano da publicação no DOU

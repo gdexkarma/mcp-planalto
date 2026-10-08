@@ -6,6 +6,9 @@ Usa apenas a biblioteca padrão: respeita HTTPS_PROXY/SSL_CERT_FILE do ambiente.
 from __future__ import annotations
 
 import gzip
+import http.client
+import os
+import tempfile
 import hashlib
 import json
 import logging
@@ -58,9 +61,13 @@ def decodificar(corpo: bytes, content_type: str = "", forcar: str | None = None)
     """Decodifica HTML/XML. O Planalto serve windows-1252 sem declarar; o Senado, UTF-8."""
     if forcar:
         return corpo.decode(forcar, "replace")
+    if corpo.startswith(b"\xef\xbb\xbf"):
+        return corpo[3:].decode("utf-8", "replace")
     ct = content_type.lower()
     if "charset=" in ct:
-        cs = ct.split("charset=")[-1].split(";")[0].strip()
+        cs = ct.split("charset=")[-1].split(";")[0].strip().strip('"')
+        if cs in ("iso-8859-1", "latin-1", "latin1", "us-ascii", "ascii"):
+            cs = "cp1252"  # na prática os portais servem windows-1252
         try:
             return corpo.decode(cs)
         except (LookupError, UnicodeDecodeError):
@@ -78,13 +85,22 @@ def decodificar(corpo: bytes, content_type: str = "", forcar: str | None = None)
 
 
 class ClienteHTTP:
-    def __init__(self, cache_dir: Path | None, user_agent: str, timeout: float = 45, tentativas: int = 5):
+    """Cliente com cache em disco (um arquivo por URL, gravado de forma atômica), revalidação por
+    ETag/Last-Modified, intervalo mínimo por host, reintentos com espera exponencial e falha rápida
+    quando um portal está fora do ar."""
+
+    MAGICO = b"MCPP1"
+
+    def __init__(self, cache_dir: Path | None, user_agent: str, timeout: float = 30, tentativas: int = 4,
+                 prazo_total: float = 90):
         self.cache_dir = cache_dir
         self.user_agent = user_agent
         self.timeout = timeout
         self.tentativas = tentativas
+        self.prazo_total = prazo_total
         self._ultimo: dict[str, float] = {}
         self._locks: dict[str, threading.Lock] = {}
+        self._falhas: dict[str, tuple[int, float]] = {}  # host -> (falhas seguidas, quando)
         self._lock = threading.Lock()
         if cache_dir:
             cache_dir.mkdir(parents=True, exist_ok=True)
@@ -94,35 +110,48 @@ class ClienteHTTP:
         if not self.cache_dir:
             return None
         h = hashlib.sha256(url.encode()).hexdigest()
-        return self.cache_dir / h[:2] / f"{h}.bin"
+        return self.cache_dir / h[:2] / f"{h}.cache"
 
     def _ler_cache(self, url: str) -> Resposta | None:
         p = self._caminho(url)
         if not p or not p.exists():
             return None
         try:
-            meta = json.loads(p.with_suffix(".json").read_text("utf-8"))
-            return Resposta(
-                url=meta["url"],
-                status=meta["status"],
-                corpo=gzip.decompress(p.read_bytes()),
-                cabecalhos=meta["cabecalhos"],
-                obtido_em=meta["obtido_em"],
-                do_cache=True,
-            )
-        except Exception:  # cache corrompido: ignora
+            dados = p.read_bytes()
+            if not dados.startswith(self.MAGICO):
+                return None
+            tam = int.from_bytes(dados[5:9], "big")
+            meta = json.loads(dados[9:9 + tam].decode("utf-8"))
+            corpo = gzip.decompress(dados[9 + tam:])
+            if hashlib.sha256(corpo).hexdigest() != meta.get("sha256"):
+                return None
+            return Resposta(url=meta["url"], status=meta["status"], corpo=corpo, cabecalhos=meta["cabecalhos"],
+                            obtido_em=meta["obtido_em"], do_cache=True)
+        except Exception:  # cache corrompido ou de versão antiga: ignora
             return None
 
     def _gravar_cache(self, pedido_url: str, r: Resposta) -> None:
         p = self._caminho(pedido_url)
         if not p:
             return
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".tmp")
-        tmp.write_bytes(gzip.compress(r.corpo, 6))
-        tmp.replace(p)
-        meta = {"url": r.url, "status": r.status, "cabecalhos": r.cabecalhos, "obtido_em": r.obtido_em}
-        p.with_suffix(".json").write_text(json.dumps(meta), "utf-8")
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            meta = json.dumps({"url": r.url, "status": r.status, "cabecalhos": r.cabecalhos,
+                               "obtido_em": r.obtido_em, "sha256": hashlib.sha256(r.corpo).hexdigest()}).encode()
+            fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")
+            with os.fdopen(fd, "wb") as f:
+                f.write(self.MAGICO + len(meta).to_bytes(4, "big") + meta + gzip.compress(r.corpo, 6))
+            os.replace(tmp, p)
+        except OSError as e:  # disco cheio etc.: o download continua valendo
+            log.warning("Não foi possível gravar o cache de %s: %s", pedido_url, e)
+
+    def esquecer(self, url: str) -> None:
+        p = self._caminho(url)
+        if p:
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
     # ---------------------------------------------------------------- rede
     def _aguardar_vez(self, host: str) -> None:
@@ -135,12 +164,25 @@ class ClienteHTTP:
                 time.sleep(espera)
             self._ultimo[host] = time.monotonic()
 
+    def _host_fora(self, host: str) -> bool:
+        n, quando = self._falhas.get(host, (0, 0.0))
+        return n >= 3 and time.monotonic() - quando < 120
+
+    def _registrar(self, host: str, ok: bool) -> None:
+        with self._lock:
+            if ok:
+                self._falhas.pop(host, None)
+            else:
+                n, _ = self._falhas.get(host, (0, 0.0))
+                self._falhas[host] = (n + 1, time.monotonic())
+
     def get(self, url: str, max_idade: float | None = 0, aceitar: str | None = None) -> Resposta:
         """Busca `url`.
 
         max_idade: segundos em que o cache é aceito sem consultar o servidor.
           0 = sempre revalida (usa ETag/Last-Modified quando houver cache);
           None = cache vale para sempre.
+        Se o servidor falhar, devolve a última cópia em cache, quando houver.
         """
         cache = self._ler_cache(url)
         if cache and (max_idade is None or time.time() - cache.obtido_em <= max_idade):
@@ -159,39 +201,60 @@ class ClienteHTTP:
                 cab["If-Modified-Since"] = lm
 
         host = urlsplit(url).hostname or ""
+        tentativas = 1 if self._host_fora(host) else self.tentativas
+        limite = time.monotonic() + self.prazo_total
         ultimo_erro: Exception | None = None
-        for tentativa in range(self.tentativas):
+        status_erro: int | None = None
+        for tentativa in range(tentativas):
             self._aguardar_vez(host)
+            espera_servidor = None
             try:
                 req = urllib.request.Request(url, headers=cab)
-                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                timeout = max(5.0, min(self.timeout, limite - time.monotonic()))
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
                     corpo = resp.read()
                     cabecalhos = {k.lower(): v for k, v in resp.headers.items()}
-                    enc = cabecalhos.get("content-encoding", "")
-                    if enc == "gzip":
-                        corpo = gzip.decompress(corpo)
-                    elif enc == "deflate":
-                        corpo = zlib.decompress(corpo)
+                    corpo = _descomprimir(corpo, cabecalhos.get("content-encoding", ""))
                     r = Resposta(resp.geturl(), resp.status, corpo, cabecalhos, time.time())
-                    self._gravar_cache(url, r)
-                    return r
+                self._registrar(host, True)
+                self._gravar_cache(url, r)
+                return r
             except urllib.error.HTTPError as e:
                 if e.code == 304 and cache:
+                    self._registrar(host, True)
                     cache.obtido_em = time.time()
                     cache.do_cache = False
                     self._gravar_cache(url, cache)
                     return cache
-                if e.code in (429, 500, 502, 503, 504):
-                    ultimo_erro = e
-                else:
+                if e.code not in (408, 429, 500, 502, 503, 504):
                     raise ErroHTTP(url, e.code, "Erro HTTP") from e
-            except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
+                ultimo_erro, status_erro = e, e.code
+                ra = e.headers.get("Retry-After") if e.headers else None
+                if ra and ra.strip().isdigit():
+                    espera_servidor = min(60.0, float(ra))
+            except (urllib.error.URLError, http.client.HTTPException, zlib.error, EOFError, OSError) as e:
                 ultimo_erro = e
-            pausa = min(30, (2**tentativa) + random.random())
+            if tentativa == tentativas - 1:
+                break
+            pausa = espera_servidor or min(20.0, (2 ** tentativa) + random.random())
+            if time.monotonic() + pausa >= limite:
+                break
             log.info("Falha em %s (%s); nova tentativa em %.1fs", url, ultimo_erro, pausa)
             time.sleep(pausa)
 
+        self._registrar(host, False)
         if cache:  # rede indisponível: devolve a última cópia conhecida
             log.warning("Usando cópia em cache de %s após falhas: %s", url, ultimo_erro)
             return cache
-        raise ErroHTTP(url, getattr(ultimo_erro, "code", None), f"Falha de rede: {ultimo_erro}")
+        raise ErroHTTP(url, status_erro, f"Portal indisponível ({ultimo_erro})")
+
+
+def _descomprimir(corpo: bytes, codificacao: str) -> bytes:
+    if codificacao == "gzip":
+        return gzip.decompress(corpo)
+    if codificacao == "deflate":
+        try:
+            return zlib.decompress(corpo)
+        except zlib.error:
+            return zlib.decompress(corpo, -15)  # deflate "cru", sem cabeçalho zlib
+    return corpo

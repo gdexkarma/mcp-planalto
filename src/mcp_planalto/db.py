@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import sqlite3
@@ -153,8 +154,10 @@ def consulta_fts(texto: str) -> str:
         if tok.upper() in ("OU", "OR", "|"):
             grupos.append([])
             continue
+        if tok.upper() in ("AND", "E", "NOT", "NEAR"):
+            continue
         prefixo = tok.endswith("*")
-        palavras = re.findall(r"[\w]+", normalizar(tok))
+        palavras = [p for p in re.findall(r"[\w]+", normalizar(tok)) if len(p) > 1 or p.isdigit()]
         if not palavras:
             continue
         if len(palavras) == 1:
@@ -170,18 +173,32 @@ class Banco:
         self.caminho = str(caminho)
         self._local = threading.local()
         self._escrita = threading.Lock()
-        with self.conexao() as c:
-            c.executescript(ESQUEMA)
+        self.conexao().executescript(ESQUEMA)
 
     def conexao(self) -> sqlite3.Connection:
         c = getattr(self._local, "c", None)
         if c is None:
-            c = sqlite3.connect(self.caminho, timeout=60, check_same_thread=False)
+            c = sqlite3.connect(self.caminho, timeout=60, check_same_thread=False, isolation_level=None)
             c.row_factory = sqlite3.Row
             c.execute("PRAGMA journal_mode=WAL")
             c.execute("PRAGMA synchronous=NORMAL")
             self._local.c = c
         return c
+
+    @contextlib.contextmanager
+    def _transacao(self):
+        """Transação de escrita exclusiva (BEGIN IMMEDIATE): evita corrida entre threads e processos
+        (ex.: CLI sincronizando enquanto o servidor roda)."""
+        with self._escrita:
+            c = self.conexao()
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                yield c
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
+            else:
+                c.execute("COMMIT")
 
     # ------------------------------------------------------------ meta
     def meta(self, chave: str, padrao: str | None = None) -> str | None:
@@ -189,7 +206,7 @@ class Banco:
         return r[0] if r else padrao
 
     def set_meta(self, chave: str, valor) -> None:
-        with self._escrita, self.conexao() as c:
+        with self._transacao() as c:
             c.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (chave, str(valor)))
 
     # ------------------------------------------------------------ normas
@@ -214,19 +231,24 @@ class Banco:
         sql += " ORDER BY ano DESC, numero DESC"
         return [self._linha(r) for r in self.conexao().execute(sql, args)]
 
-    def salvar(self, normas: Iterable[Norma], sobrescrever_vazios: bool = False) -> int:
-        """Insere ou mescla normas. Campos None não apagam valores existentes."""
+    def salvar(self, normas: Iterable[Norma], sobrescrever_vazios: bool = False,
+               substituir: Iterable[str] = ()) -> int:
+        """Insere ou mescla normas. Campos None não apagam valores existentes, salvo os listados em
+        `substituir` (ex.: "situacao", quando o Senado deixa de apontar revogação)."""
+        substituir = set(substituir)
         n = 0
-        with self._escrita, self.conexao() as c:
+        with self._transacao() as c:
             for nova in normas:
                 linha = c.execute("SELECT rowid, * FROM normas WHERE chave=?", (nova.chave,)).fetchone()
                 if linha:
                     atual = self._linha(linha)
                     for k in CAMPOS:
                         v = getattr(nova, k)
-                        if v is not None and (v != "" or sobrescrever_vazios):
-                            if k == "origem" and atual.origem and v not in atual.origem.split("+"):
-                                v = "+".join(sorted(set(atual.origem.split("+")) | {v}))
+                        if k in substituir:
+                            setattr(atual, k, v or None)
+                        elif v is not None and (v != "" or sobrescrever_vazios):
+                            if k == "origem" and atual.origem:
+                                v = "+".join(sorted(set(atual.origem.split("+")) | set(v.split("+"))))
                             setattr(atual, k, v)
                     nova = atual
                     rowid = linha["rowid"]
@@ -266,6 +288,10 @@ class Banco:
     ) -> tuple[list[tuple[Norma, float]], int]:
         """Busca no catálogo. Retorna ([(norma, pontuação)], total)."""
         expr = consulta_fts(consulta)
+        limite = max(1, min(int(limite), 1000))
+        deslocamento = max(0, int(deslocamento))
+        if consulta.strip() and not expr:
+            return [], 0  # só operadores/símbolos: nada a buscar (não devolve o catálogo inteiro)
         filtros, args = [], []
         if tipos:
             filtros.append(f"n.tipo IN ({','.join('?' * len(tipos))})")
@@ -335,7 +361,7 @@ class Banco:
 
     # ------------------------------------------------------------ reedições de MP
     def salvar_reedicoes(self, mapa: dict[str, str]) -> None:
-        with self._escrita, self.conexao() as c:
+        with self._transacao() as c:
             c.executemany("INSERT OR REPLACE INTO mp_reedicoes VALUES (?,?)", list(mapa.items()))
 
     def familia_mp(self, numero: str) -> str | None:
@@ -353,7 +379,7 @@ class Banco:
     # ------------------------------------------------------------ relações
     def salvar_relacoes(self, relacoes: Iterable[Relacao], substituir_de: list[tuple[str, str]] = ()) -> None:
         """substituir_de: [(coluna, chave)] cujas relações são apagadas antes (re-sincronização)."""
-        with self._escrita, self.conexao() as c:
+        with self._transacao() as c:
             for coluna, chave in substituir_de:
                 assert coluna in ("origem", "destino")
                 c.execute(f"DELETE FROM relacoes WHERE {coluna}=?", (chave,))

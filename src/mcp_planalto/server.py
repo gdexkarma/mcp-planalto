@@ -14,6 +14,7 @@ except ImportError:  # SDK mcp 1.x
     from mcp.server.fastmcp import FastMCP as _Servidor
 
 from .exportar import exportar
+from .http import ErroHTTP
 from .servico import Legislacao, NormaNaoEncontrada
 from .temas import TEMAS
 
@@ -35,16 +36,17 @@ Fluxo recomendado:
 Cite sempre a norma e o dispositivo. O texto do Planalto não substitui o publicado no DOU.
 """
 
-_servico: Legislacao | None = None
+_instancia: Legislacao | None = None
 _lock = threading.Lock()
+_sync_ativa = threading.Event()
 
 
 def servico() -> Legislacao:
-    global _servico
+    global _instancia
     with _lock:
-        if _servico is None:
-            _servico = Legislacao()
-        return _servico
+        if _instancia is None:
+            _instancia = Legislacao()
+        return _instancia
 
 
 def _erro(e: Exception) -> dict:
@@ -57,8 +59,17 @@ def _erro(e: Exception) -> dict:
 async def _rodar(fn, *args, **kwargs):
     try:
         return await asyncio.to_thread(fn, *args, **kwargs)
-    except (NormaNaoEncontrada, ValueError) as e:
+    except (NormaNaoEncontrada, ValueError, RuntimeError) as e:
         return _erro(e)
+    except ErroHTTP as e:
+        return {"erro": f"Portal indisponível no momento ({e}). Tente novamente em alguns minutos."}
+    except Exception as e:  # nunca derruba a sessão MCP
+        log.exception("Erro inesperado em %s", getattr(fn, "__name__", fn))
+        return {"erro": f"Erro inesperado: {type(e).__name__}: {e}"}
+
+
+async def _servico() -> Legislacao:
+    return await asyncio.to_thread(servico)
 
 
 mcp = _Servidor("planalto", instructions=INSTRUCOES)
@@ -80,8 +91,11 @@ async def ler_norma(
     Args:
         referencia: citação da norma: "Lei 9.430/1996", "Lei nº 12.973, de 2014", "LC 214/2025",
             "Decreto 9.580/2018", "RIR/2018", "CTN", "MP 2.158-35/2001", "DL 1.598/1977", "EC 132/2023", "CF".
-        dispositivo: trecho a ler: "art. 74", "arts. 15 a 20", "art. 2º, § 4º, III", "art. 10-A".
-            Vários separados por ";". Sem isto, devolve a norma inteira (paginada).
+        dispositivo: trecho a ler: "art. 74", "arts. 15 a 20", "arts. 74 e 80", "art. 2º, § 4º, III",
+            "§ 1º do art. 44", "art. 44, caput", "art. 10-A", "art. 76 do ADCT", "anexo I". Em decretos que
+            aprovam regulamento (RIR, RPS, CLT), "art. N" é do regulamento; "decreto, art. N" é do decreto.
+            Vários separados por ";". Também pode vir na própria referência ("art. 74 da Lei 9.430/96").
+            Sem isto, devolve a norma inteira (paginada).
         termo: devolve só os artigos que contêm estas palavras (ex.: "juros sobre o capital próprio").
         modo: "vigente" (só a redação atual) ou "historico" (inclui redações anteriores, marcadas ~~assim~~).
         incluir_notas: mantém notas como "(Redação dada pela Lei nº 12.973, de 2014)".
@@ -89,13 +103,14 @@ async def ler_norma(
         pagina: página do texto, quando ele excede max_caracteres.
         max_caracteres: tamanho máximo de cada página.
     """
-    r = await _rodar(servico().texto, referencia, dispositivo=dispositivo, termo=termo, modo=modo,
+    s = await _servico()
+    r = await _rodar(s.texto, referencia, dispositivo=dispositivo, termo=termo, modo=modo,
                      notas=incluir_notas, omitir_revogados=omitir_revogados, pagina=pagina,
                      max_caracteres=max_caracteres)
     if "erro" in r:
         msg = f"Erro: {r['erro']}"
         if r.get("candidatos"):
-            msg += "\nCandidatos: " + "; ".join(f"{c['norma']} ({c.get('data')}): {c.get('ementa', '')[:80]}"
+            msg += "\nCandidatos: " + "; ".join(f"{c['norma']} ({c.get('data')}): {(c.get('ementa') or '')[:80]}"
                                                 for c in r["candidatos"])
         return msg
     cab = [f"# {r['norma']}"]
@@ -126,14 +141,14 @@ async def estrutura_norma(referencia: str) -> dict:
 
     Útil antes de ler normas extensas como o RIR/2018, a LC 214/2025 ou o Código Civil.
     """
-    return await _rodar(servico().texto, referencia, estrutura=True)
+    return await _rodar((await _servico()).texto, referencia, estrutura=True)
 
 
 @mcp.tool()
 async def consultar_norma(referencia: str) -> dict:
     """Ficha da norma: ementa, data, apelido, situação (ex.: revogada), link do texto, URN LexML,
     publicação no DOU, indexação temática do Senado, quantas normas a alteraram e quem a regulamenta."""
-    return await _rodar(servico().ficha, referencia)
+    return await _rodar((await _servico()).ficha, referencia)
 
 
 @mcp.tool()
@@ -154,7 +169,7 @@ async def buscar_normas(
         tipos: filtra por tipo: LEI, LCP (lei complementar), DEC, DEL (decreto-lei), MPV, EMC, LDL.
         ano_inicio, ano_fim: intervalo de anos de assinatura.
     """
-    return await _rodar(servico().buscar, consulta, tipos, ano_inicio, ano_fim, limite, pagina)
+    return await _rodar((await _servico()).buscar, consulta, tipos, ano_inicio, ano_fim, limite, pagina)
 
 
 @mcp.tool()
@@ -174,7 +189,7 @@ async def historico_alteracoes(
             "feitas" = normas anteriores que esta alterou ou revogou.
         incluir_correlatas: inclui "legislação correlata/citada", que não altera o texto.
     """
-    return await _rodar(servico().historico, referencia, dispositivo, desde, direcao, incluir_correlatas)
+    return await _rodar((await _servico()).historico, referencia, dispositivo, desde, direcao, incluir_correlatas)
 
 
 @mcp.tool()
@@ -184,7 +199,7 @@ async def verificar_atualizacao(referencia: str) -> dict:
     Cruza as normas alteradoras registradas pelo Senado, e as normas recentes cuja ementa cita esta,
     com os links e notas do texto do Planalto. Use antes de afirmar que uma redação está atualizada.
     """
-    return await _rodar(servico().verificar_atualizacao, referencia)
+    return await _rodar((await _servico()).verificar_atualizacao, referencia)
 
 
 @mcp.tool()
@@ -206,7 +221,7 @@ async def novidades_legislativas(
             ementa genérica que alteram as normas-núcleo do tema.
         termos: termos adicionais de filtro na ementa.
     """
-    return await _rodar(servico().novidades, desde, dias, tipos, tema, termos, limite)
+    return await _rodar((await _servico()).novidades, desde, dias, tipos, tema, termos, limite)
 
 
 @mcp.tool()
@@ -238,18 +253,19 @@ async def mapear_tema(
         exportar_como: gera planilha com a lista completa (o retorno traz só as primeiras normas).
         max_resultados: quantas normas incluir na resposta.
     """
-    s = servico()
+    s = await _servico()
     r = await _rodar(s.mapear_tema, tema, termos_extras, normas_extras, tipos, ano_inicio, ano_fim,
                      True, profundidade)
     if "erro" in r:
         return r
-    if exportar_como != "nenhum" and r["normas"]:
+    if exportar_como != "nenhum" and r.get("normas"):
         notas = [
             f"Tema: {r['tema']}",
             "Termos: " + " | ".join(r["termos_usados"]),
             "Núcleo: " + "; ".join(r["nucleo"]),
-            "Camadas: núcleo (normas estruturantes), alteradora/regulamentadora (grafo de alterações do "
-            "Senado) e relacionada (ementa, apelido ou indexação contém termos do tema).",
+            "Camadas: núcleo (normas estruturantes; algumas com escopo por dispositivo), alteradora/"
+            "regulamentadora (alterou ou regulamentou o núcleo, pelo grafo do Senado), relacionada (ementa, "
+            "apelido ou indexação contém termos do tema, ou só correlata/ressalva) e alteradora de 2º nível.",
             "Relevância: soma de pontos das evidências; serve para ordenar, não é juízo jurídico.",
             f"Cobertura do catálogo: {r['cobertura']}",
         ]
@@ -257,6 +273,7 @@ async def mapear_tema(
             exportar, r["normas"], s.config.export_dir, f"acervo-{r['tema']}", exportar_como,
             None, f"Acervo de legislação federal: {r['tema']}", notas)
         r["arquivo_exportado"] = str(caminho)
+    max_resultados = max(1, min(int(max_resultados), 500))
     r["normas"] = r["normas"][:max_resultados]
     if r["total"] > max_resultados:
         r["observacao"] = f"Mostrando {max_resultados} de {r['total']}; a lista completa está na planilha."
@@ -275,7 +292,7 @@ async def listar_temas() -> dict:
 @mcp.tool()
 async def status_indice() -> dict:
     """Estado do catálogo local: quantas normas, quando foi sincronizado e se há sincronização em curso."""
-    return await asyncio.to_thread(servico().status)
+    return await _rodar(lambda: servico().status())
 
 
 @mcp.tool()
@@ -294,24 +311,30 @@ async def sincronizar_catalogo(
         ano_inicio: só normas a partir deste ano.
         limite_detalhes: máximo de normas a detalhar nesta rodada (a sincronização é retomável).
     """
-    s = servico()
-    if s.sincronizando.is_set():
-        return {"status": "já existe uma sincronização em andamento", **s.status()}
+    s = await _servico()
+    from .servico import normalizar_tipos
+
+    try:
+        tipos = normalizar_tipos(tipos)
+    except ValueError as e:
+        return _erro(e)
+    with _lock:
+        if s.sincronizando.is_set() or _sync_ativa.is_set():
+            return {"status": "já existe uma sincronização em andamento", **(await asyncio.to_thread(s.status))}
+        _sync_ativa.set()
 
     def rodar():
         try:
             s.sincronizar_catalogo(tipos, ano_inicio)
             if detalhes_senado:
-                s.sincronizando.set()
-                try:
-                    s.sincronizar_detalhes(tipos, ano_inicio, limite_detalhes)
-                finally:
-                    s.sincronizando.clear()
+                s.sincronizar_detalhes(tipos, ano_inicio, max(1, limite_detalhes))
         except Exception:
             log.exception("Falha na sincronização")
+        finally:
+            _sync_ativa.clear()
 
     threading.Thread(target=rodar, daemon=True, name="sincronizacao").start()
-    return {"status": "sincronização iniciada em segundo plano", **s.status()}
+    return {"status": "sincronização iniciada em segundo plano", **(await asyncio.to_thread(s.status))}
 
 
 def _auto_sincronizar() -> None:
@@ -319,6 +342,10 @@ def _auto_sincronizar() -> None:
     s = servico()
     if not s.config.auto_sync:
         return
+    with _lock:
+        if _sync_ativa.is_set():
+            return
+        _sync_ativa.set()
     try:
         if s.db.estatisticas()["total_normas"] < 1000:
             log.info("Catálogo vazio: sincronizando quadros do Planalto (alguns minutos)...")
@@ -329,6 +356,8 @@ def _auto_sincronizar() -> None:
                 s.atualizar_recentes()
     except Exception:
         log.exception("Falha na sincronização automática")
+    finally:
+        _sync_ativa.clear()
 
 
 def main(transporte: str = "stdio", host: str = "127.0.0.1", porta: int = 8000) -> None:
