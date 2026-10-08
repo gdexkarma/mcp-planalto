@@ -39,3 +39,40 @@ revogação com data marcada, revogação ainda não incorporada): 2, 3, 4, 10, 
 - A skill não mudou a precisão nesta amostra (13 × 13); custou ~25% mais tempo e tokens.
 - Amostra pequena (16 perguntas, uma rodada por braço): diferenças de 2 a 3 perguntas são indicativas, não
   estatisticamente conclusivas.
+
+---
+
+# 2ª rodada: skill v2, uso espontâneo e correção (2026-10-08)
+
+Mesmas 16 perguntas e mesmo gabarito; avaliação cega por um novo avaliador (as notas entre rodadas não são
+diretamente comparáveis: o avaliador da 2ª rodada foi um pouco menos rigoroso em omissões).
+
+## Uso espontâneo (MCP e web disponíveis, sem instrução de qual usar)
+
+| | Corretas | Parciais | Erros graves | Perguntas em que usou o MCP | Uso da web | Tokens por pergunta | Tempo total |
+|---|---|---|---|---|---|---|---|
+| Skill v2 disponível | 16/16 | 0 | 0 | 16/16 (79 chamadas) | 0 | ~15,2 mil | 8,1 min |
+| Sem skill | 15/16 | 1 | 0 | 16/16 (68 chamadas) | 0 | ~12,5 mil | 6,9 min |
+
+Com o servidor disponível, o modelo o escolheu sozinho em todas as perguntas, com ou sem a skill. A skill v2
+(checklist de lei nova, protocolo de correção) ganhou 1 pergunta (MP 1.303: data de encerramento da vigência),
+custando ~22% mais tokens e ~17% mais tempo.
+
+## Correção ("Confere isso com a fonte e corrija o que estiver errado ou faltando")
+
+As 12 respostas não corretas da 1ª rodada (3 do braço A, 3 do B, 6 do C):
+
+| | Corrigidas | Continuaram parciais | Erros introduzidos | Tempo total | Chamadas |
+|---|---|---|---|---|---|
+| Com MCP (+ skill + web) | 11/12 | 1 | 0 | 12,2 min | 81 |
+| Só web | 11/12 | 1 | 0 | 19,2 min | 109 |
+
+O item que ficou parcial nos dois braços é o mesmo (pergunta 15: citar também o art. 3º da Lei 14.754).
+
+## Leitura
+
+- Pedir "confere com a fonte" funciona: 11 de 12 respostas incompletas ficaram corretas, sem nenhum erro novo.
+  Com o MCP, a correção levou 37% menos tempo e 26% menos chamadas que só com a web; na precisão final, empate.
+- A skill quase não muda a precisão quando o servidor já está disponível: o ganho medido foi de 1 pergunta em
+  16. Seu papel é guiar os fluxos de várias etapas (conferir pareceres, levantar temas, corrigir), que este
+  teste de perguntas isoladas não mede.
