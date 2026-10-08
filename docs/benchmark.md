@@ -76,3 +76,27 @@ O item que ficou parcial nos dois braços é o mesmo (pergunta 15: citar também
 - A skill quase não muda a precisão quando o servidor já está disponível: o ganho medido foi de 1 pergunta em
   16. Seu papel é guiar os fluxos de várias etapas (conferir pareceres, levantar temas, corrigir), que este
   teste de perguntas isoladas não mede.
+
+# 3ª rodada: tarefas de várias etapas, com e sem skill (2026-10-08)
+
+Antes desta rodada, o checklist e o roteiro de correção da skill passaram para as instruções do servidor, e
+`ler_norma` passou a mostrar a cláusula de vigência da lei recente que deu a redação lida. Os dois braços
+usaram esse servidor e tinham a web disponível; só um tinha a skill.
+
+Tarefas (6): conferir as cinco citações de um trecho de parecer (quatro erradas); levantar a legislação de
+JCP; alíquota de CSLL de banco em 2025, 2026, 2027 e 2030; revisar minuta de e-mail sobre o fim do PIS/Cofins;
+parecer curto sobre DCOMP de estimativa e multa do art. 74, § 17 (Tema 736 do STF); novidades de IRPJ/CSLL
+dos últimos 60 dias. Gabarito por agente independente com fontes primárias; correção às cegas.
+
+| Braço | Corretas | Erros graves | Pontuação (0–10, soma) | Fatos desejáveis | Tempo | Chamadas | Tokens |
+|---|---|---|---|---|---|---|---|
+| Com skill | 6/6 | 0 | 51 | 24 | 8,7 min | 87 | ~258 mil |
+| Sem skill | 6/6 | 0 | 54 | 28 | 9,8 min | 123 | ~256 mil |
+
+- Os dois braços acertaram todos os fatos essenciais, inclusive as armadilhas (vigência futura, revogação
+  em 2027, Tema 736, MP 1.303 sem efeitos). Nenhum erro grave.
+- A skill não melhorou a qualidade; o braço sem skill teve pontuação e completude um pouco maiores
+  (diferença dentro do ruído de uma amostra de 6). Com a skill houve 29% menos chamadas (a maior diferença
+  foi na tarefa de novidades), com tempo e tokens equivalentes.
+- Conclusão: com as instruções do servidor, a skill é dispensável. O que ela ensinava já chega ao modelo
+  pelo próprio MCP.
