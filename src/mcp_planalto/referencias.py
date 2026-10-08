@@ -116,6 +116,9 @@ APELIDOS: dict[str, tuple[str, str, int]] = {
 
 
 def sem_acento(s: str) -> str:
+    # NFKC antes: "Ｌｅｉ ９.４３０" (largura total) vira "Lei 9.430"; º e ª são preservados
+    s = unicodedata.normalize("NFKC", s.replace("º", "\x00o").replace("ª", "\x00a"))
+    s = s.replace("\x00o", "º").replace("\x00a", "ª")
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
 

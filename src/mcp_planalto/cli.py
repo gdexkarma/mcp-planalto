@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--detalhes", action="store_true",
                    help="baixa indexação e alterações do Senado para cada norma (demorado, retomável)")
     s.add_argument("--so-detalhes", action="store_true", help="pula os quadros do Planalto")
-    s.add_argument("--limite", type=int, help="máximo de normas a detalhar")
+    s.add_argument("--limite", type=int, help="máximo de normas a detalhar (>= 1)")
     s.add_argument("--paralelo", type=int, default=4, help="requisições simultâneas ao Senado")
 
     s = sub.add_parser("ler", help="lê o texto atualizado de uma norma")
@@ -90,9 +90,9 @@ def main(argv: list[str] | None = None) -> None:
         from .server import main as servir
 
         if a.cmd == "servir" and a.http:
-            servir("http", a.host, a.porta)
+            servir("http", a.host, a.porta, a.verboso)
         else:
-            servir()
+            servir(verboso=a.verboso)
         return
 
     logging.basicConfig(level=logging.INFO if a.verboso else logging.WARNING,
@@ -130,11 +130,15 @@ def main(argv: list[str] | None = None) -> None:
             _imprimir(L.novidades(a.desde, a.dias, a.tipos, a.tema))
         elif a.cmd == "mapear":
             from .exportar import exportar
+            from .server import notas_metodologicas
 
             r = L.mapear_tema(a.tema, a.termos, a.normas, a.tipos, a.desde_ano, a.ate_ano,
                               profundidade=a.profundidade, progresso=progresso)
+            if not r["normas"]:
+                print("Nenhuma norma encontrada. " + " ".join(r.get("avisos", [])), file=sys.stderr)
+                sys.exit(1)
             caminho = exportar(r["normas"], L.config.export_dir, f"acervo-{r['tema']}", a.formato,
-                               titulo=f"Acervo de legislação federal: {r['tema']}")
+                               titulo=f"Acervo de legislação federal: {r['tema']}", notas=notas_metodologicas(r))
             resumo = {k: v for k, v in r.items() if k != "normas"}
             resumo["primeiras"] = [f"{n['norma']} [{n['camada']}] {n['relevancia']}" for n in r["normas"][:25]]
             resumo["arquivo"] = str(caminho)
@@ -149,7 +153,10 @@ def main(argv: list[str] | None = None) -> None:
     except ErroHTTP as e:
         print(f"Erro: portal indisponível ({e}). Tente novamente em alguns minutos.", file=sys.stderr)
         sys.exit(2)
-    except (NormaNaoEncontrada, ValueError, RuntimeError) as e:
+    except OSError as e:
+        print(f"Erro de arquivo/sistema: {e}. Confira MCP_PLANALTO_HOME.", file=sys.stderr)
+        sys.exit(2)
+    except (NormaNaoEncontrada, ValueError, RuntimeError, OverflowError) as e:
         print(f"Erro: {e}", file=sys.stderr)
         for c in getattr(e, "candidatos", []):
             print(f"  - {c.nome} ({c.data}): {(c.ementa or '')[:90]}", file=sys.stderr)

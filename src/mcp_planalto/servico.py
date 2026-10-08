@@ -236,6 +236,8 @@ class Legislacao:
         raise erro
 
     def _resolver_ref(self, ref: Referencia) -> Norma:
+        if ref.ano and ref.ano > hoje().year:
+            raise NormaNaoEncontrada(f"{ref.nome}: o ano {ref.ano} ainda não chegou.")
         if not ref.ano and ref.tipo != "CF":
             cands = self.db.candidatos(ref)
             exatos = [c for c in cands if c.numero == ref.numero]
@@ -707,15 +709,21 @@ class Legislacao:
         h = hoje()
         ano_ini = h.year - 1 if h.month <= 2 else h.year
         n = 0
-        for tipo in TIPOS_CATALOGO:
-            if tipo in ("DEL", "LDL"):
-                continue
-            try:
-                es = self.indices.entradas(tipo, ano_inicio=ano_ini, max_idade=max_idade)
-            except ErroHTTP as e:
-                log.warning("Falha ao atualizar quadro %s: %s", tipo, e)
-                continue
-            n += self._salvar_entradas(es)
+        ja_sincronizando = self.sincronizando.is_set()
+        self.sincronizando.set()
+        try:
+            for tipo in TIPOS_CATALOGO:
+                if tipo in ("DEL", "LDL"):
+                    continue
+                try:
+                    es = self.indices.entradas(tipo, ano_inicio=ano_ini, max_idade=max_idade)
+                except ErroHTTP as e:
+                    log.warning("Falha ao atualizar quadro %s: %s", tipo, e)
+                    continue
+                n += self._salvar_entradas(es)
+        finally:
+            if not ja_sincronizando:
+                self.sincronizando.clear()
         self.db.set_meta("recentes_em", agora())
         return n
 
@@ -1138,7 +1146,9 @@ class Legislacao:
                                 n.ementa = None
                         total += self.db.salvar(normas)
                     aviso(f"Senado {tipo}: {total} normas")
-            self.db.set_meta("catalogo_em", agora())
+            if set(tipos) >= set(TIPOS_CATALOGO) and not ano_inicio:
+                # só a carga completa marca o catálogo como pronto (uma carga interrompida é retomada)
+                self.db.set_meta("catalogo_em", agora())
             return {"normas_por_tipo": resumo, **self.db.estatisticas()}
         finally:
             self.sincronizando.clear()
@@ -1150,8 +1160,10 @@ class Legislacao:
         """Baixa do Senado indexação e vides das normas do catálogo ainda sem detalhe (retomável)."""
         aviso = progresso or (lambda _m: None)
         tipos = normalizar_tipos(tipos) or TIPOS_DETALHE_PADRAO
+        if limite is not None and limite < 1:
+            raise ValueError("limite deve ser pelo menos 1 (omita para processar todas).")
         pendentes = [n for n in self.db.iterar(tipos, ano_inicio, sem_detalhe=True) if n.ano]
-        if limite:
+        if limite is not None:
             pendentes = pendentes[:limite]
         ok = falhas = vazios = 0
         inicio = time.time()

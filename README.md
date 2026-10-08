@@ -42,7 +42,7 @@ As citações são interpretadas como um advogado escreveria: `Lei 9.430/96`, `L
 
 ## Instalação
 
-Requer Python 3.10 ou superior.
+Requer Python 3.10 ou superior. Funciona com o SDK `mcp` 1.8+ e 2.x.
 
 ```bash
 pip install git+https://github.com/gdexkarma/mcp-planalto
@@ -78,6 +78,8 @@ Se instalou com `pip`, use `"command": "mcp-planalto"` e `"args": []`.
 ```bash
 mcp-planalto servir --http --host 0.0.0.0 --porta 8000   # endpoint em /mcp
 ```
+
+> O modo HTTP não tem autenticação: qualquer pessoa que alcance a porta pode usar todas as ferramentas, inclusive disparar sincronizações. Exponha-o só em rede confiável ou atrás de um proxy com autenticação.
 
 ---
 
