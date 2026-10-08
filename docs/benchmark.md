@@ -100,3 +100,37 @@ dos últimos 60 dias. Gabarito por agente independente com fontes primárias; co
   foi na tarefa de novidades), com tempo e tokens equivalentes.
 - Conclusão: com as instruções do servidor, a skill é dispensável. O que ela ensinava já chega ao modelo
   pelo próprio MCP.
+
+# 4ª rodada: teste ampliado, MCP × só web, duas execuções (2026-10-08)
+
+36 itens, cada um rodado 2 vezes em cada braço (144 respostas): as 16 perguntas da 1ª rodada, 14 perguntas
+novas escritas por agentes independentes que não conheciam o servidor (IRPJ/CSLL/IRPF/internacional e
+PIS-Cofins/IPI/IOF/previdenciárias/PAF/CTN/Simples/reforma), e as 6 tarefas de várias etapas da 3ª rodada.
+Braço MCP: servidor + web disponível. Braço web: só WebSearch/WebFetch. Gabaritos de fontes primárias;
+correção às cegas por 7 corretores, com as respostas embaralhadas.
+
+| | MCP | Só web |
+|---|---|---|
+| Corretas — 30 perguntas (60 respostas) | **55 (92%)** | 47 (78%) |
+| — 16 perguntas antigas | 31/32 | 27/32 |
+| — 14 perguntas novas (não usadas no desenvolvimento) | 24/28 | 20/28 |
+| Corretas — 6 tarefas de várias etapas (12 respostas) | **12 (100%)** | 9 (75%) |
+| **Total corretas (72 respostas)** | **67 (93%)** | 56 (78%) |
+| Respostas com erro grave | 3 | 10 |
+| Pontuação média (0–10), perguntas | 8,9 | 7,8 |
+| Pontuação média (0–10), tarefas | 8,6 | 7,3 |
+| Tempo médio por pergunta / por tarefa | 22 s / 70 s | 38 s / 97 s |
+| Ferramentas por pergunta / tokens por pergunta | 3,1 / ~9,8 mil | 5,0 / ~10,0 mil |
+
+- Comparação pareada por item (36 itens): o MCP acertou mais vezes em 11, a web em 1, empate em 24.
+  Teste do sinal: p ≈ 0,006 (bilateral). A vantagem não é explicada por acaso.
+- Nas perguntas novas, que não serviram para ajustar o servidor, a diferença se mantém (86% × 71%).
+- Erros do braço MCP: a pergunta 105 (todos os quatro braços chamaram a Lei 15.191/2025 de "conversão" da
+  MP 1.294, que ela na verdade revogou; o servidor informa "Revogada", mas o modelo não consultou a MP e
+  respondeu de memória); a pergunta 13 numa execução (leu a cláusula de vigência da LC 224 e aplicou o inciso
+  errado); a pergunta 106 parcial nos dois braços (não citou o ato declaratório).
+- Erros típicos do braço web: redação vigente sem a exceção incluída em 2025 (art. 74, § 12, II, h),
+  alíquota sem a mudança de 2027 (resseguradoras), redação do CTN anterior à LC 236/2026, fundamento da CSLL
+  dos bancos no inciso errado.
+- O Planalto ficou fora do ar (HTTP 503) durante parte da correção; os corretores conferiram pontos fora do
+  gabarito em fontes secundárias e não usaram isso contra as respostas.
