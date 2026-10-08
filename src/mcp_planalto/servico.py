@@ -186,6 +186,8 @@ def cita_norma(texto: str, ref: Referencia) -> bool:
     if ref.tipo == "CF":
         return False
     t = _normalizado(texto)
+    if "lein" in t:  # "Leinº 15.272" (sem espaço) no HTML do Planalto
+        t = re.sub(r"\blein(?=[º°o]?\s*\d)", "lei n", t)
     base = ref.numero.split("-")[0]
     numeros = {formatar_numero(base), base}
     for num in numeros:
@@ -268,6 +270,46 @@ _RE_VIDE = re.compile(r"\(\s*Vide\b[^()]*(?:\([^()]*\)[^()]*)*\)\s*(?:Vig[êe]nc
 def _cita_incorporada(texto: str, ref: Referencia) -> bool:
     """O texto cita `ref` fora de "(Vide Lei X) Vigência": a remissão só avisa de mudança futura."""
     return cita_norma(_RE_VIDE.sub(" ", texto), ref)
+
+
+_RE_NOTA_ORIGEM = re.compile(r"^\(?\s*(?:Reda[çc][ãa]o|Inclu[íi]d|Revogad|Acrescid|Renumerad|Suprimid)", re.I)
+
+
+def _cita_blocos(blocos, ref: Referencia) -> bool:
+    """Os blocos citam `ref` como origem da redação: no texto (fora de "Vide") ou no link da nota (o Planalto às
+    vezes erra o número na nota mas acerta o link: "Lei nº 15.452" -> L15352.htm)."""
+    if _cita_incorporada(" ".join(b.completo for b in blocos), ref):
+        return True
+    pad = _padrao_arquivo(ref)
+    if pad is None:
+        return False
+    for b in blocos:
+        for texto, href, _ctx in b.links:
+            if _RE_NOTA_ORIGEM.match(texto.strip()) and pad.match(href.split("#")[0].rsplit("/", 1)[-1].lower()):
+                return True
+    return False
+
+
+def _dispositivo_refletido(doc: Documento, ref: Referencia, k: tuple, acao: str, sufixo: str = "") -> bool:
+    """A alteração `acao` de `ref` no dispositivo `k` aparece no texto? Na dúvida (artigo não localizado,
+    renumeração), considera refletida: o alerta só deve soar com evidência."""
+    art_bl = doc.selecionar(rotulo_dispositivo(k[:1]) + sufixo)
+    if not art_bl:
+        return True
+    alvo = doc.selecionar(rotulo_dispositivo(k) + sufixo) if len(k) > 1 else art_bl
+    if acao.startswith(("renumeracao", "supressao")):
+        return True
+    if acao.startswith("acrescimo"):
+        if alvo:
+            return not _incluido_por_outra(alvo, ref) or _cita_blocos(alvo, ref)
+        # artigo vetado: o § acrescentado não existe mesmo
+        return any(b.tipo == "dispositivo" and len(b.chave) == 1 and "VETADO" in (b.vigente or "") for b in art_bl)
+    if acao.startswith("revogacao") and (not alvo or all(b.revogado or b.obsoleto for b in alvo
+                                                         if b.tipo == "dispositivo")):
+        return True
+    # alteração: nota no próprio dispositivo, nos que o contêm ou em outro dispositivo do artigo alterado pela
+    # mesma lei (o Senado às vezes registra o vizinho: "XXI - ...;" mudou só para incluir o XXII)
+    return _cita_blocos(alvo or [], ref) or _cita_blocos(art_bl, ref)
 
 
 def _incluido_por_outra(blocos, ref: Referencia) -> bool:
@@ -796,15 +838,19 @@ class Legislacao:
                 cab["efeitos_futuros"] = futuros
                 for f in futuros:
                     if f["tipo"] == "revogacao_futura":
-                        alertas.append(f"{f['norma']} ({f['dispositivo_revogador']}) revoga este dispositivo "
-                                       f"a partir de {_data_br(f['data'])}: \"{f['trecho'][:300]}\"")
+                        alertas.append(f"a partir de {_data_br(f['data'])}, a {f['norma']} ({f['dispositivo_revogador']}) "
+                                       f"revoga dispositivos desta norma que abrangem este artigo ou partes dele; confira "
+                                       f"se o trecho lido está na lista: \"{f['trecho'][:400]}\"")
                     else:
                         alertas.append(f"a redação do {f['dispositivo'] or 'dispositivo'} dada por norma cuja "
                                        f"cláusula de vigência ({f['norma']}) só produz efeitos a partir de "
                                        f"{_data_br(f['data'])}; até lá vale a redação anterior"
                                        + (" (em 'redacao_ainda_aplicavel')" if f.get("redacao_ainda_aplicavel")
                                           else " (use modo='historico')"))
-            pend = self._alteracoes_nao_refletidas(norma, dispositivo, blocos)
+            pend = self._alteracoes_nao_refletidas(norma, dispositivo, blocos, doc)
+            for mp in self._mps_sem_eficacia_nas_notas(blocos):
+                alertas.append(f"a redação de parte do trecho veio da {mp[0]}, que não está mais em vigor ({mp[1]}) e "
+                               "não aparece convertida em lei nas notas: o texto mostrado pode não valer mais")
             if pend is None:
                 cab["aviso_senado"] = ("Não foi possível conferir agora, no Senado, se há alteração recente deste "
                                        "dispositivo ainda não refletida no texto (portal lento ou fora do ar).")
@@ -912,7 +958,27 @@ class Legislacao:
                         out.append(item)
         return out
 
-    def _alteracoes_nao_refletidas(self, norma: Norma, dispositivo: str, blocos: list) -> list[str]:
+    def _mps_sem_eficacia_nas_notas(self, blocos: list) -> list[tuple[str, str]]:
+        """MPs citadas como origem ("Incluído/Redação dada pela MP X") de blocos vivos, que caducaram ou foram
+        rejeitadas, quando o bloco não cita também uma lei (a de conversão)."""
+        out = []
+        for b in blocos:
+            if b.obsoleto or b.revogado or not b.notas:
+                continue
+            origens = set()
+            for n in b.notas:
+                if re.match(r"\((?:Reda[çc][ãa]o dada|Inclu[íi]d|Acrescid)", n):
+                    origens |= citacoes_de_normas(n)
+            if not origens or any(not c.startswith("MPV:") for c in origens):
+                continue
+            for c in origens:
+                sit = self._mp_encerrada(c)
+                if sit and not re.search(r"convert", normalizar(sit)) and (self._nome(c), sit) not in out:
+                    out.append((self._nome(c), sit))
+        return out[:3]
+
+    def _alteracoes_nao_refletidas(self, norma: Norma, dispositivo: str, blocos: list,
+                                   doc: Documento | None = None) -> list[str] | None:
         """Alterações dos últimos 2 anos registradas pelo Senado para o dispositivo e não citadas nos blocos."""
         alvo = chave_dispositivo(dispositivo)
         if not alvo:
@@ -928,8 +994,8 @@ class Legislacao:
         if not det:
             return None if aviso and "indispon" in aviso else []
         adct = norma.tipo == "CF" and _e_adct(dispositivo)
+        sufixo = " do ADCT" if adct else ""
         limite = (hoje() - dt.timedelta(days=730)).isoformat()
-        texto = " ".join(b.completo for b in blocos)
         vistas, out = set(), []
         for r in det.relacoes_recebidas:
             if (r.data or "") < limite or not r.dispositivo or not _acao_altera_texto(r):
@@ -941,9 +1007,15 @@ class Legislacao:
             if not dispositivo_casa(alvo, chave_dispositivo(r.dispositivo)):
                 continue
             ref = Referencia.de_chave(r.origem)
-            if r.origem in vistas or cita_norma(texto, ref):
+            if r.origem in vistas:
                 continue
             if ref.tipo == "MPV" and self._mp_encerrada(r.origem):
+                continue
+            k = chave_dispositivo(r.dispositivo)
+            if doc is not None and k:
+                if _dispositivo_refletido(doc, ref, k, normalizar(r.acao), sufixo):
+                    continue
+            elif _cita_blocos(blocos, ref):
                 continue
             vistas.add(r.origem)
             out.append(f"{ref.nome} ({r.acao or 'alteração'}: {r.dispositivo})")
@@ -1220,6 +1292,10 @@ class Legislacao:
                 # alteração antiga sem nota no texto: em geral remissão registrada pelo Senado como alteração,
                 # artigo vetado, ou nota omitida pelo Planalto - não indica compilado desatualizado
                 antigas.append(item)
+            elif estado == "nao_localizado":
+                item["motivo"] = ("Os dispositivos que o Senado registra não existem no texto (norma revogada, numeração "
+                                  "diferente ou registro na norma errada): confira se a alteração é mesmo desta norma.")
+                a_conferir.append(item)
             elif estado == "parcial":
                 item["motivo"] = ("O texto cita esta norma em parte dos artigos alterados, mas não em: "
                                   + "; ".join(faltam[:10]) + ". Pode ser incorporação parcial, vigência "
@@ -1308,30 +1384,35 @@ class Legislacao:
             por_artigo.setdefault(rotulo_dispositivo(k[:1]) + sufixo, []).append((k, normalizar(r.acao), sufixo))
         if not por_artigo:
             return ("refletida" if citada_doc else "ausente"), []
+        if doc.tudo_riscado():
+            return ("refletida" if citada_doc else "nao_localizado"), []
         ok, faltam = 0, []
         for rot_art, itens in por_artigo.items():
             bl = doc.selecionar(rot_art)
             if not bl:
                 continue  # artigo não localizado (numeração do Senado diferente): não decide
-            if _cita_incorporada(" ".join(b.completo for b in bl), ref):
+            if _cita_blocos(bl, ref):
+                # o artigo cita a alteradora; mas acréscimo de dispositivo que não existe no texto continua pendente
+                # (LC 123, art. 33, § 1º-C: o caput já tem nota da LC 227, o § 1º-C não foi incluído)
+                novos = [rotulo_dispositivo(k) + sufixo for k, acao, sufixo in itens
+                         if acao.startswith("acrescimo") and len(k) > 1
+                         and not _dispositivo_refletido(doc, ref, k, acao, sufixo)]
+                if novos:
+                    faltam += novos
                 ok += 1
                 continue
-            refletido = False
-            for k, acao, sufixo in itens:
-                alvo = doc.selecionar(rotulo_dispositivo(k) + sufixo)
-                if not alvo:
-                    continue
-                if acao.startswith("acrescimo") and not _incluido_por_outra(alvo, ref):
-                    refletido = True  # o dispositivo acrescentado existe
-                elif acao.startswith("revogacao") and all(b.revogado or b.obsoleto for b in alvo
-                                                          if b.tipo == "dispositivo"):
-                    refletido = True
+            # sem nota no artigo: vale se o acréscimo existe (e não é homônimo de outra lei), se o artigo é VETADO,
+            # se o revogado aparece revogado/riscado
+            refletido = any(_dispositivo_refletido(doc, ref, k, acao, sufixo) for k, acao, sufixo in itens
+                            if acao.startswith(("acrescimo", "revogacao")))
             if refletido:
                 ok += 1
             else:
                 faltam.append(rot_art)
         if not ok and not faltam:
-            return ("refletida" if citada_doc else "ausente"), []
+            # nenhum dos dispositivos registrados existe no texto (norma toda riscada, numeração diferente ou
+            # registro do Senado na norma errada): não há base para dizer que falta
+            return ("refletida" if citada_doc else "nao_localizado"), []
         if not faltam:
             return "refletida", []
         if ok:
@@ -2039,6 +2120,9 @@ def _ementa_altera(ementa: str, ref: Referencia) -> bool:
     # norma alterada (", e a Lei Y") ou o fim
     e = re.sub(r"\b(?:para|a fim de|com o objetivo de)\b.*?(?=,?\s+e\s+(?:a|o|as|os)\s+(?:lei|decreto|medida|"
                r"codigo|consolidacao|emenda)|;|$)", " ", e)
+    # "Altera a Lei 15.473, que altera a Lei 9.818...": a oração "que altera/alterou..." descreve a lei citada
+    e = re.sub(r"\b(?:que|a qual|o qual|as quais|os quais)\s+(?:altera|alterou|acrescenta|acrescentou|revoga|revogou|"
+               r"modifica|modificou|da nova redacao|deu nova redacao)\b.*?(?=\bpara\b|;|$)", " ", e)
     for m in re.finditer(r"\b(altera|revoga|acrescenta|acresce|da nova redacao|modifica|inclui|prorroga)\w*\b", e):
         trecho = e[m.start(): m.start() + 600]
         trecho = re.split(r";|\be da outras\b", trecho)[0]

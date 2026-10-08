@@ -254,12 +254,19 @@ class Documento:
             art = chave[0][1]
             e = esp if esp is not None else self._espaco_padrao(art)
             if len(chave) == 1:
+                no_caput = True
                 for i, b in enumerate(self.blocos):
                     if b.artigo != art or b.espaco != e or b.tipo in ("estrutura", "rodape"):
                         continue
-                    if caput and b.tipo == "dispositivo" and len(b.chave) > 1 and b.chave[1][0] == "par":
-                        break  # caput acaba no primeiro parágrafo
-                    escolhidos.append(i)
+                    if caput and b.tipo == "dispositivo":
+                        # o caput acaba no primeiro parágrafo; mas o Planalto às vezes lista a redação antiga
+                        # inteira (caput e §§ riscados) antes da atual: um novo caput reabre a seleção
+                        if len(b.chave) > 1 and b.chave[1][0] == "par":
+                            no_caput = False
+                        elif len(b.chave) == 1:
+                            no_caput = True
+                    if no_caput:
+                        escolhidos.append(i)
                 continue
             dentro = False
             for i, b in enumerate(self.blocos):
@@ -572,6 +579,7 @@ def _rotular(blocos: list[Bloco]) -> None:
     art = par = inc = ali = None
     ctx_vivo = ctx_todos = (None, None, None)
     ultimo_corpo = None  # último artigo do articulado principal
+    anexo_rubrica = False
     espaco = ""
     em_citacao = False
     alterador = False  # o artigo corrente introduz texto de outra norma
@@ -590,7 +598,9 @@ def _rotular(blocos: list[Bloco]) -> None:
     anterior = ""
     for i, b in enumerate(blocos):
         base = b.vigente or ""
-        if not (_inicio_dispositivo(base) or _RE_ESTRUTURA.match(base)):
+        if not (_inicio_dispositivo(base) or _RE_ESTRUTURA.match(base)) or \
+                (b.completo.lstrip().startswith("~~") and _casa_art(b.crua())):
+            # "~~Art. 6º ... do~~ Anexo III (Revogado...)": é o art. 6º revogado, não a rubrica de um anexo
             base = b.crua()
         texto_anterior, anterior = anterior, (base or anterior)
         # ---------------------------------------------------------- rodapé
@@ -656,6 +666,9 @@ def _rotular(blocos: list[Bloco]) -> None:
                 ident = bruto or ("I" if anexos_vistos == 1 else str(anexos_vistos))
                 anexo_atual = ident
                 espaco, art = f"anexo:{ident}", None
+                # "Protocolo" (rubrica da Lei 6.404) ou "Anexo III (Revogado...)" no meio do texto podem não abrir
+                # anexo nenhum: se o próximo artigo continuar a numeração do corpo, volta-se ao corpo
+                anexo_rubrica = ident == "PROTOCOLO" or bool(re.search(r"revogad", base, re.I))
             par = inc = ali = None
             ctx_vivo = ctx_todos = (None, None, None)
             alterador = False
@@ -669,7 +682,7 @@ def _rotular(blocos: list[Bloco]) -> None:
         par, inc, ali = ctx_vivo if vivo else ctx_todos
         if m:
             num = m.group("num").replace(".", "")
-            if espaco == "anexo:PROTOCOLO" and num != "1" and anexo_atual not in anexos_com_artigos and \
+            if espaco.startswith("anexo:") and anexo_rubrica and num != "1" and anexo_atual not in anexos_com_artigos and \
                     ultimo_corpo and int(num) == _ordem(ultimo_corpo)[0] + 1 and not m.group("suf"):
                 # "Protocolo"/"Anexo" que era só rubrica: o artigo seguinte continua a numeração do corpo
                 for x in blocos[max(0, i - 4):i]:

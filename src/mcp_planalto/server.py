@@ -143,9 +143,15 @@ async def ler_norma(
 ) -> str:
     """Lê o texto atualizado (compilado) de uma norma federal direto do Planalto, inteiro ou por dispositivo.
 
-    Também aceita o dispositivo na própria referência: "art. 74, § 12 da Lei 9.430/96". Ao ler um dispositivo,
-    traz as notas de vigência do cabeçalho da norma e um ALERTA quando o Senado registra alteração recente do
-    dispositivo que o texto ainda não mostra.
+    Também aceita o dispositivo na própria referência: "art. 74, § 12 da Lei 9.430/96"; para o ADCT use
+    "art. 76 do ADCT" (ou referencia="ADCT"). O modo vigente mostra a redação MAIS NOVA do Planalto, mesmo quando
+    ela só produz efeitos no futuro. Por isso, ao ler um dispositivo, o servidor segue as notas "(Produção de
+    efeitos)", "(Vigência)" e "(Vide …)" até a cláusula de vigência da outra norma e emite um ALERTA, com a data
+    e a redação que ainda se aplica, quando os efeitos são futuros ou quando há revogação com data marcada (ex.:
+    LC 214/2025, art. 542, que revoga a legislação do PIS/Cofins em 1º/1/2027). Também alerta quando o Senado
+    registra alteração recente do dispositivo que o texto ainda não mostra. Limitação: regras autônomas que
+    mudam a aplicação de um dispositivo sem alterar seu texto (ex.: acréscimo de percentuais de presunção por lei
+    posterior) não aparecem; use historico_alteracoes/buscar_normas e a sua análise.
     """
     s = await _servico()
     r = await _rodar(s.texto, referencia, dispositivo=dispositivo, termo=termo, modo=modo,
@@ -160,8 +166,16 @@ async def ler_norma(
         cab.append(f"Situação: {r['situacao']}")
     cab.append(f"Fonte: {r['url']}" + (f" (página atualizada no Planalto em {r['planalto_atualizado_em']})"
                                        if r.get("planalto_atualizado_em") else ""))
-    if r.get("alerta"):
-        cab.append(f"ALERTA: {r['alerta']}")
+    for k, rot in (("aviso_rede", "AVISO"), ("aviso_edicao", "AVISO"), ("aviso_situacao", "AVISO"),
+                   ("alerta", "ALERTA"), ("aviso_duplicidade", "AVISO"), ("aviso_senado", "Aviso")):
+        if r.get(k):
+            cab.append(f"{rot}: {r[k]}")
+    for f in r.get("efeitos_futuros", []):
+        if f.get("redacao_ainda_aplicavel"):
+            cab.append(f"Redação que ainda se aplica ao {f.get('dispositivo') or 'dispositivo'} até "
+                       f"{f['data'][8:10]}/{f['data'][5:7]}/{f['data'][:4]}: {f['redacao_ainda_aplicavel']}")
+    if r.get("contexto"):
+        cab.append(f"Contexto (dispositivo superior): {r['contexto']}")
     for k, rot in (("observacao_numeracao", "Numeração"), ("notas_gerais", "Notas"),
                    ("notas_de_vigencia_da_norma", "Notas de vigência da norma (valem para todo o texto)"),
                    ("anexos", "Anexos")):
@@ -170,6 +184,7 @@ async def ler_norma(
             cab.append(f"{rot}: " + (" · ".join(v) if isinstance(v, list) else v))
     if r.get("artigos_com_o_termo") is not None:
         cab.append(f"Artigos com o termo: {r['artigos_com_o_termo']}" +
+                   (f": {', '.join(r['artigos_encontrados'])}" if r.get("artigos_encontrados") else "") +
                    (f" ({r['observacao']})" if r.get("observacao") else ""))
     if r.get("legenda"):
         cab.append(r["legenda"])
@@ -212,7 +227,11 @@ async def buscar_normas(
     limite: Annotated[int, Field(ge=1, le=100, description="Resultados por página.")] = 20,
     pagina: Annotated[int, Field(ge=1, le=1000)] = 1,
 ) -> dict:
-    """Busca normas no catálogo local por ementa, apelido e indexação temática do Senado."""
+    """Busca normas no catálogo local por ementa, apelido e indexação temática do Senado.
+
+    Não pesquisa o texto das normas: zero resultados não significa ausência de legislação (para achar um
+    assunto dentro de uma norma use ler_norma com termo=...). Siglas usuais (IRPJ, IRRF, JCP, CSLL, IBS, CBS...)
+    são expandidas; "A/B" = um ou outro; plural e gênero são tolerados."""
     s = await _servico()
     return await _rodar(s.buscar, consulta, tipos, ano_inicio, ano_fim, limite, pagina)
 
@@ -230,7 +249,14 @@ async def historico_alteracoes(
     incluir_correlatas: Annotated[bool, Field(
         description="Inclui legislação correlata/citada e dispositivos vetados (não alteram o texto).")] = False,
 ) -> dict:
-    """Histórico de alterações de uma norma ou de um dispositivo (dados do Senado Federal)."""
+    """Histórico de alterações de uma norma ou de um dispositivo (dados do Senado Federal).
+
+    Ressalvas, regulamentações e conversões de MP vêm em 'outras_relacoes'; reedições de MP são agrupadas;
+    normas que o Senado diz terem alterado a norma sem indicar o dispositivo vêm em 'alteracoes_sem_dispositivo'.
+    Os dados do Senado podem estar incompletos, sobretudo em direcao='feitas' e em normas recentes: nesse caso a
+    resposta também lista as normas citadas nas cláusulas "passa a vigorar"/"ficam revogados" do próprio texto.
+    Revogações com data futura aparecem em ler_norma e verificar_atualizacao (o Senado não as registra por
+    dispositivo)."""
     s = await _servico()
     return await _rodar(s.historico, referencia, dispositivo, desde, direcao, incluir_correlatas)
 
@@ -241,8 +267,9 @@ async def verificar_atualizacao(referencia: Referencia) -> dict:
 
     Para cada norma alteradora registrada pelo Senado, procura a nota "(Redação dada/Incluído/Revogado pela …)"
     em cada artigo alterado (acréscimos: o dispositivo existe e não foi incluído por outra norma). Também procura
-    leis dos últimos ~13 meses cuja ementa diz alterar a norma. Separa: não refletidas (ATENÇÃO), a conferir (só
-    em "Vide", incorporação parcial ou vigência futura), antigas sem nota (informativo) e MPs encerradas. Use
+    leis dos últimos ~13 meses cuja ementa diz alterar a norma e resolve as notas de vigência do texto para listar
+    redações e revogações com efeitos FUTUROS. Separa: não refletidas (ATENÇÃO), a conferir (só em "Vide",
+    incorporação parcial), efeitos e revogações futuras, antigas sem nota (informativo) e MPs encerradas. Use
     antes de afirmar que uma redação está atualizada.
     """
     s = await _servico()
@@ -290,7 +317,9 @@ async def mapear_tema(
     Combina: (1) normas-núcleo do tema (algumas com escopo por dispositivo); (2) normas que alteraram, revogaram
     ou regulamentaram o núcleo, pelo grafo de alterações do Senado (pega leis de ementa genérica como "Altera a
     Lei nº 9.430..."); (3) normas cuja ementa, apelido ou indexação batem com os termos do tema. Cada norma vem
-    com camada, relevância e o motivo de ter entrado.
+    com camada, relevância e o motivo de ter entrado. Em tema livre (fora de listar_temas) informe sempre
+    normas_extras (as leis-base do assunto, ex.: "Lei 9.249/1995, art. 9" para JCP): sem elas o resultado depende
+    só da ementa e perde as leis de ementa genérica.
     """
     s = await _servico()
     r = await _rodar(s.mapear_tema, tema, termos_extras, normas_extras, tipos, ano_inicio, ano_fim,

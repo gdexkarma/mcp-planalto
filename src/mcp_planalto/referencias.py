@@ -463,7 +463,9 @@ def rotulo_dispositivo(chave: tuple) -> str:
         elif k == "par":
             out.append("parágrafo único" if v == "unico" else f"§ {_num(v)}")
         elif k == "inc":
-            out.append(int_para_romano(int(v)) if v.isdigit() else v.upper())
+            m = re.fullmatch(r"(\d+)([a-z]?)", v)
+            out.append(int_para_romano(int(m.group(1))) + (f"-{m.group(2).upper()}" if m.group(2) else "")
+                       if m else v.upper())
         elif k == "ali":
             out.append(f'alínea "{v}"')
         elif k == "item":
