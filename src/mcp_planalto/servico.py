@@ -815,7 +815,8 @@ class Legislacao:
                     if m:
                         achados[n.chave] = m
                 elif n.tipo in ("LEI", "LCP", "MPV", "DEL", "EMC") or (
-                        n.tipo == "DEC" and re.search(r"tribut|imposto|contribui|aliquota|regulament", normalizar(n.ementa or ""))):
+                        n.tipo == "DEC" and re.search(r"tribut|imposto|contribuic|aliquota|incidencia",
+                                                      normalizar(n.ementa or ""))):
                     consultar.append(n)
             sobra = max(0, len(consultar) - max_consultas)
             with ThreadPoolExecutor(max_workers=4) as ex:
@@ -885,6 +886,7 @@ class Legislacao:
         aviso_p(f"Núcleo: {len(nucleo)} normas")
 
         # 2. grafo de alterações
+        extras_fracas: dict[str, list[str]] = {}
         if seguir_alteracoes and nucleo:
             fronteira = [(n, esc) for n, esc, _d in nucleo.values()]
             vistos = set(nucleo)
@@ -918,13 +920,15 @@ class Legislacao:
                                 cam = camada
                             elif classes["regulamenta"]:
                                 pts, rot, cam = 45, f"regulamenta {alvo.nome}", camada
-                            elif classes["correlata"]:
-                                pts, rot, cam = 12, f"legislação correlata a {alvo.nome}", "relacionada"
-                            elif classes["ressalva"]:
-                                pts, rot, cam = 8, f"ressalva ou novo tratamento de {alvo.nome}", "relacionada"
-                            elif classes["vetada"]:
-                                pts, rot, cam = 5, f"só dispositivos vetados sobre {alvo.nome}", "relacionada"
                             else:
+                                # correlata, ressalva e vetos não bastam para entrar no acervo (ruído: quase toda
+                                # lei tributária é "correlata" ao CTN); só contam se a norma vier por outra via
+                                for classe, rotulo in (("correlata", "legislação correlata a"),
+                                                       ("ressalva", "ressalva ou novo tratamento de"),
+                                                       ("vetada", "só dispositivos vetados sobre")):
+                                    if classes[classe]:
+                                        extras_fracas.setdefault(origem, []).append(f"{rotulo} {alvo.nome}")
+                                        break
                                 continue
                             if nivel > 1:
                                 pts *= 0.4
@@ -959,6 +963,11 @@ class Legislacao:
                     continue
                 marcar(n.chave, 20 + min(score, 15) * 2, f"ementa/indexação: {termo}", "relacionada")
         aviso_p(f"Catálogo: {len(achados)} normas")
+
+        for chave, motivos in extras_fracas.items():
+            if chave in achados:
+                for m in motivos:
+                    marcar(chave, 5, m, "relacionada")
 
         if agrupar_reedicoes:
             achados = self._agrupar_reedicoes(achados)
@@ -1209,9 +1218,11 @@ _STOPWORDS = {"de", "da", "do", "das", "dos", "e", "a", "o", "as", "os", "para",
 
 
 def _termo_livre(tema: str) -> str:
-    """Tema livre vira frase sem palavras vazias ("subvenções para investimento" -> "subvencoes" "investimento")."""
+    """Tema livre vira busca por radicais, sem palavras vazias:
+    "subvenções para investimento" -> "subvenc* investim*" (casa subvenção/subvenções, investimento/investimentos)."""
     palavras = [p for p in re.findall(r"[\w/]+", normalizar(tema)) if p not in _STOPWORDS]
-    return " ".join(palavras)
+    radicais = [(p[: max(5, len(p) - 3)] + "*") if len(p) >= 7 and p.isalpha() else p for p in palavras]
+    return " ".join(radicais)
 
 
 def _ementa_orcamentaria(ementa: str | None) -> bool:

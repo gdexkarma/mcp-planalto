@@ -114,7 +114,7 @@ def test_mapear_tema_livre(L):
     assert por_chave["LEI:9430:1996"]["camada"] == "núcleo"
     assert por_chave["LEI:12973:2014"]["camada"] == "alteradora/regulamentadora"
     assert por_chave["LEI:15525:2026"]["camada"] == "alteradora/regulamentadora"
-    assert por_chave["LEI:14000:2021"]["relevancia"] < por_chave["LEI:12973:2014"]["relevancia"]
+    assert "LEI:14000:2021" not in por_chave  # só vetos: não entra no acervo
     assert r["normas"][0]["chave"] == "LEI:9430:1996"
 
 
