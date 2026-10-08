@@ -1398,7 +1398,14 @@ class Legislacao:
                          if acao.startswith("acrescimo") and len(k) > 1
                          and not _dispositivo_refletido(doc, ref, k, acao, sufixo)]
                 if novos:
-                    faltam += novos
+                    # o Senado às vezes erra a numeração ("§ 15" que é o inciso XV, "§ 9º-A" que é "§ 9º-B"): só falta
+                    # se o artigo não tem outros blocos "(Incluído pela <alteradora>)" fora dos registrados
+                    registrados = {k for k, acao, _s in itens}
+                    incluidos_fora = sum(1 for b in bl if not b.obsoleto and b.chave not in registrados
+                                         and re.search(r"\((?:Inclu[íi]d|Acrescid)", b.completo)
+                                         and _cita_blocos([b], ref))
+                    if len(novos) > incluidos_fora:
+                        faltam += novos[incluidos_fora:]
                 ok += 1
                 continue
             # sem nota no artigo: vale se o acréscimo existe (e não é homônimo de outra lei), se o artigo é VETADO,
