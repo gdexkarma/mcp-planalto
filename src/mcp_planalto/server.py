@@ -2,6 +2,9 @@
 
 import asyncio
 import logging
+import os
+import sqlite3
+import sys
 import threading
 import time
 from typing import Annotated, Literal
@@ -79,7 +82,15 @@ async def _rodar(fn, *args, **kwargs):
     except (NormaNaoEncontrada, ValueError, RuntimeError) as e:
         raise ToolError(_mensagem(e)) from e
     except ErroHTTP as e:
+        if e.status == 404:
+            raise ToolError(f"Página não encontrada no portal ({e.url}): o link do Planalto/Senado está quebrado ou "
+                            "foi removido.") from e
         raise ToolError(f"Portal indisponível no momento ({e}). Tente novamente em alguns minutos.") from e
+    except sqlite3.OperationalError as e:
+        msg = str(e)
+        dica = ("o banco está ocupado por uma sincronização; tente de novo em instantes" if "locked" in msg else
+                "disco cheio: libere espaço" if "full" in msg else "confira MCP_PLANALTO_HOME")
+        raise ToolError(f"Erro no banco local ({msg}): {dica}.") from e
     except OSError as e:
         raise ToolError(f"Erro de arquivo/sistema: {e}. Confira MCP_PLANALTO_HOME.") from e
     except Exception as e:  # nunca derruba a sessão MCP
@@ -386,7 +397,16 @@ def main(transporte: str = "stdio", host: str = "127.0.0.1", porta: int = 8000, 
     threading.Thread(target=_auto_sincronizar, daemon=True, name="auto-sync").start()
     if transporte == "stdio":
         mcp.run("stdio")
-        return
+        # stdin fechado: sai já, sem esperar consultas ao portal que possam estar presas na rede
+        try:
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            pass
+        logging.shutdown()
+        os._exit(0)
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        log.warning("Servidor HTTP em %s:%s SEM autenticação: qualquer um que alcance esta porta pode usar as "
+                    "ferramentas (inclusive gravar exportações). Prefira 127.0.0.1.", host, porta)
     try:
         mcp.run("streamable-http", host=host, port=porta)
     except TypeError:  # SDK 1.x: host/porta vêm das settings, e a proteção de Host é ligada no construtor

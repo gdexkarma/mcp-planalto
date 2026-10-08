@@ -163,6 +163,7 @@ class Documento:
     last_modified: str | None = None
     arquivos_citados: set[str] = field(default_factory=set)  # nomes de arquivo dos links (l12973.htm...)
     links_gerais: list[tuple[str, str, str]] = field(default_factory=list)  # links do cabeçalho (ver Bloco.links)
+    aviso_rede: str | None = None  # cópia local entregue porque o Planalto não respondeu
 
     def bloco_da_ancora(self, nome: str) -> int | None:
         nome = nome.lower()

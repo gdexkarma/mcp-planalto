@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import collections
 import datetime as dt
+import functools
+import hashlib
 import logging
 import math
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import Callable
@@ -20,7 +22,7 @@ from typing import Callable
 from .config import Config
 from .db import Banco, Norma, Relacao, agora, radical_flexao
 from .fontes.planalto_indices import EntradaIndice, IndicesPlanalto
-from .fontes.planalto_texto import Documento, ler_documento
+from .fontes.planalto_texto import Documento, citacoes_de_normas, ler_documento
 from .fontes.senado import DetalheSenado, Senado
 from .http import ClienteHTTP, ErroHTTP
 from .referencias import (
@@ -121,8 +123,11 @@ def classificar_relacao(r: Relacao) -> str:
         return "regulamenta"
     if "correlata" in d or "citada" in d or "correlato" in a:
         return "correlata"
-    if a.startswith(("ressalva", "com novo tratamento")) or "novo tratamento" in d:
+    if a.startswith(("ressalva", "com novo tratamento")) or "novo tratamento" in d or \
+            (not a and "ressalva" in d and "revogacao" not in d):
         return "ressalva"
+    if "disposicoes em contrario" in d:
+        return "outra"  # "revoga as disposições em contrário": não revoga a norma inteira
     if "conversao" in d and not a:
         return "conversao"
     if "reedicao" in d and not a:
@@ -130,7 +135,9 @@ def classificar_relacao(r: Relacao) -> str:
     if "revogacao" in d and "no todo" in d:
         return "altera"
     if a.startswith(("alteracao", "acrescimo", "revogacao", "supressao", "renumeracao", "revigora",
-                     "restauracao", "repristinacao", "retificacao com sentido", "nova redacao")):
+                     "restauracao", "repristinacao", "retificacao com sentido", "nova redacao",
+                     # o Planalto anota esses como "Redação dada/Revogado pela": mudam o texto
+                     "encerramento de vigencia", "vigencia determinada")) and "implicita" not in a:
         return "altera"
     if not a and ("alteracao" in d or "revogacao" in d):
         return "altera"  # declaração de alteração sem itens detalhados
@@ -169,12 +176,16 @@ _RE_TIPO_ANTES = {
 }
 
 
+# verificar_atualizacao procura centenas de normas no mesmo texto de vários MB: normaliza uma vez só
+_normalizado = functools.lru_cache(maxsize=16)(normalizar)
+
+
 def cita_norma(texto: str, ref: Referencia) -> bool:
     """O texto cita a norma? Reconhece "Lei nº 9.430", "Lei n o 9.430", "Lei 9430", "Leis nºs 9.249 e 9.430",
     sem confundir "Decreto-Lei nº 2.848" com "Lei nº 2.848"."""
     if ref.tipo == "CF":
         return False
-    t = normalizar(texto)
+    t = _normalizado(texto)
     base = ref.numero.split("-")[0]
     numeros = {formatar_numero(base), base}
     for num in numeros:
@@ -229,6 +240,8 @@ def _decl_forte(r: Relacao) -> bool:
     """Declaração que atinge a norma inteira mesmo sem itens (revogação no todo, suspensão, perda de
     eficácia, revigoração, conversão de MP)."""
     d = normalizar(r.declaracao)
+    if "disposicoes em contrario" in d:
+        return False
     if any(x in d for x in ("eficacia", "caduc", "rejei", "conversao")):
         return True
     return "no todo" in d and any(x in d for x in ("revogacao", "suspensao", "revigoracao", "repristin"))
@@ -293,6 +306,61 @@ _SINONIMOS_SIGLA = {
     "ipi": 'IPI OU "imposto sobre produtos industrializados"',
     "cprb": 'CPRB OU "contribuicao previdenciaria sobre a receita bruta"',
 }
+
+
+def _contexto_superior(doc: Documento, blocos: list) -> str | None:
+    """Ao ler só um inciso/alínea/parágrafo, a cabeça a que ele se liga (caput do artigo, § ou inciso pai)."""
+    chaves = [b.chave for b in blocos if b.chave and not b.obsoleto]
+    if not chaves or min(len(k) for k in chaves) < 2:
+        return None
+    k = min(chaves, key=len)
+    partes = []
+    for n in range(1, len(k)):
+        pai = k[:n]
+        b = next((x for x in doc.blocos if x.chave == pai and not x.obsoleto and x.espaco == blocos[0].espaco), None)
+        if b and b.vigente:
+            partes.append(b.vigente[:400] + ("…" if len(b.vigente) > 400 else ""))
+    return " ▸ ".join(partes) or None
+
+
+def _situacao_exibida(norma: Norma) -> tuple[str | None, str | None]:
+    """(situação, aviso). MP anterior à EC 32 "em tramitação" vale por força do art. 2º da emenda; MP recente
+    "em tramitação" com o prazo vencido provavelmente caducou ou foi convertida."""
+    sit = norma.situacao
+    if norma.tipo == "MPV" and "tramit" in normalizar(sit or ""):
+        if (norma.data or "9999") < "2001-09-12" or re.match(r"\d+-\d+$", norma.numero):
+            return ("Em vigor por força do art. 2º da EC 32/2001 (MP anterior à emenda: vale até ser convertida, "
+                    "rejeitada ou revogada)"), None
+        if norma.data and norma.data < (hoje() - dt.timedelta(days=130)).isoformat():
+            return sit, ("O cadastro diz 'em tramitação', mas o prazo constitucional da MP (até 120 dias, fora o "
+                         "recesso) já passou: provavelmente perdeu a eficácia ou foi convertida. Confira no Congresso.")
+    return sit, None
+
+
+def _em_segundo_plano(fn, *args) -> Future:
+    """Executa em thread daemon (não segura o encerramento do servidor se o portal travar)."""
+    fut: Future = Future()
+
+    def rodar():
+        try:
+            fut.set_result(fn(*args))
+        except BaseException as e:  # noqa: BLE001 - repassado a quem espera o resultado
+            fut.set_exception(e)
+
+    threading.Thread(target=rodar, daemon=True, name="senado-fundo").start()
+    return fut
+
+
+_BLOQUEIO_PAGINA = re.compile(rb"request rejected|the requested url was rejected|access denied|acesso negado|"
+                              rb"service unavailable", re.I)
+
+
+def _pagina_invalida(corpo: bytes) -> str | None:
+    if len(corpo.strip()) < 300:
+        return "página vazia"
+    if len(corpo) < 20000 and _BLOQUEIO_PAGINA.search(corpo[:20000]):
+        return "página de bloqueio do portal"
+    return None
 
 
 def _data_br(iso: str | None) -> str:
@@ -394,9 +462,11 @@ def _redacao_anterior(doc: Documento, b) -> str | None:
 
 
 def _familia(chave: str) -> str:
-    """MPs reeditadas (pré-2001) contam como uma só: "MPV:1537-41:1997" -> "MPV:1537"."""
-    if chave.startswith("MPV:") and re.match(r"MPV:\d+-\d+:", chave):
-        return "MPV:" + chave.split(":")[1].split("-")[0]
+    """MPs reeditadas (pré-EC 32/2001) contam como uma só: "MPV:1537-41:1997" e "MPV:1537:1996" -> "MPV:1537".
+    Depois da EC 32 a numeração recomeçou do 1 e não há reedições."""
+    m = re.match(r"MPV:(\d+)(?:-\d+)?:(\d{4})$", chave)
+    if m and (int(m.group(2)) < 2001 or (int(m.group(2)) == 2001 and int(m.group(1)) >= 1000) or "-" in chave):
+        return "MPV:" + m.group(1)
     return chave
 
 
@@ -409,7 +479,8 @@ class Legislacao:
         self.senado = Senado(self.http)
         self._docs: collections.OrderedDict[str, tuple[float, Documento]] = collections.OrderedDict()
         self._detalhes: collections.OrderedDict[str, tuple[float, DetalheSenado]] = collections.OrderedDict()
-        self._fundo = ThreadPoolExecutor(max_workers=2, thread_name_prefix="senado")
+        self._travas_url: dict[str, threading.Lock] = {}
+        self.ultimas_falhas_recentes: list[str] = []
         self._lock = threading.Lock()
         self._sync_lock = threading.Lock()
         self.sincronizando = Atividade()
@@ -532,6 +603,10 @@ class Legislacao:
         if det:
             self._gravar_detalhe(det, guardar)
             return det, None
+        local = self._detalhe_do_banco(ref.chave)
+        if local and (local.relacoes_recebidas or local.relacoes_feitas):
+            return local, ("O Senado não devolveu o registro desta norma agora; usando os dados de alterações já "
+                           "guardados localmente.")
         return None, "O Senado não tem registro desta norma (ainda não indexada ou não numerada)."
 
     def _detalhe_do_banco(self, chave: str) -> DetalheSenado | None:
@@ -574,58 +649,85 @@ class Legislacao:
         return self.obter_detalhe(norma, max_idade)[0]
 
     # ================================================================ texto
+    def _carregar(self, url: str, max_idade: float, forcar: bool = False) -> Documento:
+        """Baixa (ou revalida) e interpreta uma página do Planalto, com cache em memória e uma trava por URL
+        (leituras simultâneas da mesma norma não processam a página várias vezes). Página vazia, de
+        bloqueio ou sem nenhum artigo não entra no cache: é baixada de novo uma vez e, persistindo, vira erro."""
+        url = url.split("#")[0]
+        with self._lock:
+            trava = self._travas_url.setdefault(url, threading.Lock())
+        with trava:
+            with self._lock:
+                em_cache = self._docs.get(url)
+                if not forcar and em_cache and time.time() - em_cache[0] < max_idade:
+                    self._docs.move_to_end(url)
+                    return em_cache[1]
+            for tentativa in range(2):
+                r = self.http.get(url, max_idade=0 if (forcar or tentativa) else max_idade)
+                assinatura = hashlib.sha256(r.corpo).hexdigest()
+                if em_cache and getattr(em_cache[1], "_assinatura", None) == assinatura:
+                    doc = em_cache[1]  # revalidada e igual: não reprocessa (LC 214 leva segundos)
+                    break
+                motivo = _pagina_invalida(r.corpo)
+                doc = None
+                if not motivo:
+                    try:
+                        doc = ler_documento(r.texto(), r.url, r.last_modified)
+                    except Exception as e:  # lxml: "Document is empty" etc.
+                        motivo = f"página ilegível ({type(e).__name__})"
+                    else:
+                        if not doc.epigrafe and not any(b.tipo == "dispositivo" for b in doc.blocos):
+                            motivo = "página sem epígrafe nem artigos"
+                if not motivo:
+                    break
+                self.http.esquecer(url)
+                log.warning("Planalto devolveu página inválida para %s: %s", url, motivo)
+                if tentativa:
+                    raise ErroHTTP(url, None, f"O Planalto devolveu uma página inválida ({motivo}); tente de novo "
+                                              "em alguns minutos")
+            doc._assinatura = assinatura
+            doc.aviso_rede = r.falha
+            with self._lock:
+                self._docs[url] = (time.time(), doc)
+                self._docs.move_to_end(url)
+                while len(self._docs) > 12:
+                    self._docs.popitem(last=False)
+            return doc
+
     def _doc_por_url(self, url: str) -> Documento:
         """Documento de outra página do Planalto (destino de link), com o mesmo cache de documentos."""
-        url = url.split("#")[0]
-        max_idade = self.config.cache_horas * 3600
-        with self._lock:
-            if url in self._docs and time.time() - self._docs[url][0] < max_idade:
-                return self._docs[url][1]
-        r = self.http.get(url, max_idade=max_idade)
-        doc = ler_documento(r.texto(), r.url, r.last_modified)
-        with self._lock:
-            self._docs[url] = (time.time(), doc)
-            while len(self._docs) > 12:
-                self._docs.popitem(last=False)
-        return doc
+        return self._carregar(url, self.config.cache_horas * 3600)
 
     def documento(self, norma: Norma, forcar: bool = False) -> Documento:
         if not norma.url_planalto:
             raise NormaNaoEncontrada(
                 f"{norma.nome} não tem texto disponível no Planalto (o quadro do Planalto não traz o link, "
                 "ou o link aponta para outra norma).")
-        url = norma.url_planalto
-        max_idade = 0 if forcar else self.config.cache_horas * 3600
-        with self._lock:
-            if not forcar and url in self._docs and time.time() - self._docs[url][0] < max_idade:
-                self._docs.move_to_end(url)
-                return self._docs[url][1]
-        r = self.http.get(url, max_idade=max_idade)
-        doc = ler_documento(r.texto(), r.url, r.last_modified)
-        with self._lock:
-            self._docs[url] = (time.time(), doc)
-            while len(self._docs) > 12:
-                self._docs.popitem(last=False)
-        return doc
+        return self._carregar(norma.url_planalto, self.config.cache_horas * 3600, forcar)
 
     def texto(self, referencia: str, dispositivo: str | None = None, termo: str | None = None,
               modo: str = "vigente", notas: bool = True, omitir_revogados: bool = False,
               estrutura: bool = False, pagina: int = 1, max_caracteres: int = 40000) -> dict:
         if modo not in ("vigente", "historico"):
             raise ValueError("modo deve ser 'vigente' ou 'historico'.")
-        _ref, disp_citado = interpretar_citacao(referencia)
-        dispositivo = dispositivo or disp_citado
+        dispositivo = self._dispositivo_pedido(referencia, dispositivo)
         norma = self.resolver(referencia)
         doc = self.documento(norma)
         cab = {
             "norma": norma.nome,
+            **({"aviso_rede": doc.aviso_rede} if doc.aviso_rede else {}),
             "epigrafe": doc.epigrafe or None,
             "ementa": norma.ementa or doc.ementa,
             "url": doc.url,
             "planalto_atualizado_em": _data_http(doc.last_modified),
         }
-        if norma.situacao:
-            cab["situacao"] = norma.situacao
+        sit, aviso_sit = _situacao_exibida(norma)
+        if sit:
+            cab["situacao"] = sit
+        if aviso_sit:
+            cab["aviso_situacao"] = aviso_sit
+        if ed := self._aviso_edicao(referencia, norma):
+            cab["aviso_edicao"] = ed
         espacos = [e for e in doc.espacos() if e]
         if "reg" in espacos:
             cab["observacao_numeracao"] = ("Esta norma aprova um regulamento anexo: 'art. N' se refere ao regulamento; "
@@ -655,11 +757,22 @@ class Legislacao:
             if not blocos:
                 cab["aviso"] = f"Dispositivo '{dispositivo}' não encontrado. Use estrutura_norma para ver o sumário."
                 return cab
+            if ctx := _contexto_superior(doc, blocos):
+                cab["contexto"] = ctx
         if termo:
             base = blocos if blocos is not None else doc.blocos
             sub = Documento(doc.url, doc.epigrafe, doc.ementa, doc.notas_gerais, base)
             blocos, n_arts = sub.buscar(termo)
             cab["artigos_com_o_termo"] = n_arts
+            achados = []
+            for b in blocos:
+                rot = (f"anexo {b.espaco.split(':', 1)[1]}" if b.espaco.startswith("anexo:")
+                       else rotulo_dispositivo((("art", b.artigo),)) + (" do ADCT" if b.espaco == "adct" else "")
+                       if b.artigo else None)
+                if rot and rot not in achados:
+                    achados.append(rot)
+            if achados:
+                cab["artigos_encontrados"] = achados
             if n_arts > 15:
                 cab["observacao"] = f"Mostrando os 15 primeiros de {n_arts} artigos com o termo."
             if not blocos:
@@ -669,10 +782,15 @@ class Legislacao:
             cab["notas_gerais"] = doc.notas_gerais
         elif dispositivo and doc.notas_gerais:
             # "(Vide Lei X) Vigência", "produção de efeitos": valem também para o dispositivo lido
-            ano_min = hoje().year - 2
-            vig = [n for n in doc.notas_gerais
-                   if re.search(r"vig[êe]ncia|efeitos|vigorar", n, re.I)
-                   or any(int(a) >= ano_min for a in re.findall(r"\b(?:19|20)\d\d\b", n))]
+            ano_min = hoje().year - 3
+            vig = []
+            for n in doc.notas_gerais:
+                # só as remissões a normas recentes; rótulos de link soltos ("Texto compilado Vigência") são ruído
+                n = re.sub(r"\s*\($", "", n).strip()
+                if not re.search(r"\(Vide\b|Lei|Decreto|Medida|Emenda", n):
+                    continue
+                if any(int(a) >= ano_min for a in re.findall(r"\b(?:19|20)\d\d\b", n)):
+                    vig.append(n if n.count("(") <= n.count(")") else n + ")")
             if vig:
                 cab["notas_de_vigencia_da_norma"] = vig[:12]
         if dispositivo and blocos:
@@ -695,7 +813,10 @@ class Legislacao:
                                        + (" (em 'redacao_ainda_aplicavel')" if f.get("redacao_ainda_aplicavel")
                                           else " (use modo='historico')"))
             pend = self._alteracoes_nao_refletidas(norma, dispositivo, blocos)
-            if pend:
+            if pend is None:
+                cab["aviso_senado"] = ("Não foi possível conferir agora, no Senado, se há alteração recente deste "
+                                       "dispositivo ainda não refletida no texto (portal lento ou fora do ar).")
+            elif pend:
                 alertas.append("o Senado registra alterações recentes deste dispositivo que não aparecem nas notas "
                                "do texto do Planalto (vigência futura ou compilado desatualizado): " + "; ".join(pend)
                                + ". Confira no DOU ou com verificar_atualizacao")
@@ -806,14 +927,14 @@ class Legislacao:
             return []
         # complemento da leitura: não pode atrasá-la. Espera até 10 s; a consulta segue em segundo plano
         # e fica em cache para a próxima leitura.
-        futuro = self._fundo.submit(self.obter_detalhe, norma)
+        futuro = _em_segundo_plano(self.obter_detalhe, norma)
         try:
-            det, _ = futuro.result(timeout=10)
+            det, aviso = futuro.result(timeout=10)
         except Exception as e:  # sem Senado (ou lento), segue só com o texto
             log.info("Senado indisponível para o alerta de %s: %s", norma.nome, e)
-            return []
+            return None
         if not det:
-            return []
+            return None if aviso and "indispon" in aviso else []
         adct = norma.tipo == "CF" and _e_adct(dispositivo)
         limite = (hoje() - dt.timedelta(days=730)).isoformat()
         texto = " ".join(b.completo for b in blocos)
@@ -857,26 +978,91 @@ class Legislacao:
                 rec = [r for r in rec if r.origem.startswith("EMC:")]
             elif norma.tipo != "DEC":
                 rec = [r for r in rec if not r.origem.startswith("DEC:")]  # decreto não altera lei
-            out["alterada_por"] = len({_familia(r.origem) for r in rec})
+            fam: dict = {}
+            out["alterada_por"] = len({self._familia_mp(r.origem, fam) for r in rec})
             out["ultima_alteracao"] = max((r.data for r in rec if r.data), default=None)
             regs = {}
             for r in det.relacoes_recebidas:
                 if classificar_relacao(r) == "regulamenta":
-                    regs.setdefault(_familia(r.origem), r.origem)
+                    regs.setdefault(self._familia_mp(r.origem, fam), r.origem)
             out["regulamentada_por"] = sorted(self._nome(c) for c in regs.values())
             out["normas_que_esta_altera"] = len({r.destino for r in det.relacoes_feitas
                                                  if classificar_relacao(r) == "altera"})
-        if norma.tipo == "MPV" and "tramit" in normalizar(norma.situacao or ""):
-            if (norma.data or "9999") < "2001-09-12":
-                out["situacao"] = ("Em vigor por força do art. 2º da EC 32/2001 (MP anterior à emenda: vale até "
-                                   "ser convertida, rejeitada ou revogada)")
-            elif norma.data and norma.data < (hoje() - dt.timedelta(days=130)).isoformat():
-                out["aviso_situacao"] = ("O cadastro diz 'em tramitação', mas o prazo constitucional da MP (até 120 "
-                                         "dias, fora o recesso) já passou: provavelmente perdeu a eficácia ou foi "
-                                         "convertida. Confira no Congresso.")
+        sit, aviso_sit = _situacao_exibida(norma)
+        if sit:
+            out["situacao"] = sit
+        if aviso_sit:
+            out["aviso_situacao"] = aviso_sit
+        if ed := self._aviso_edicao(referencia, norma):
+            out["aviso_edicao"] = ed
         if aviso:
             out["aviso"] = aviso
         return out
+
+    def _aviso_edicao(self, referencia: str, norma: Norma) -> str | None:
+        """MP reeditada: o Planalto só publica o texto compilado da última edição da família."""
+        try:
+            pedida = interpretar(referencia)
+        except ValueError:
+            return None
+        if pedida.tipo == "MPV" and norma.tipo == "MPV" and pedida.numero != norma.numero:
+            return (f"Você pediu a MP {formatar_numero(pedida.numero)}; ela foi reeditada (ou renumerada) e o texto, "
+                    f"a ficha e o histórico são os da última edição da família, a {norma.nome}. A redação de uma edição "
+                    "intermediária pode ser diferente.")
+        return None
+
+    @staticmethod
+    def _dispositivo_pedido(referencia: str, dispositivo: str | None) -> str | None:
+        """Dispositivo informado à parte ou na própria referência ("art. 74 da Lei 9.430"). Com a referência
+        "ADCT", o dispositivo é do ADCT ("art. 76" -> "art. 76 do ADCT")."""
+        _ref, disp_citado = interpretar_citacao(referencia)
+        if disp_citado == "ADCT" or (disp_citado and _e_adct(disp_citado) and not dispositivo):
+            if dispositivo and not _e_adct(dispositivo):
+                return f"{dispositivo} do ADCT"
+            return dispositivo or (None if disp_citado == "ADCT" else disp_citado)
+        return dispositivo or disp_citado
+
+    def _alteradas_no_texto(self, norma: Norma, ja: set[str]) -> list[str]:
+        """Normas que o próprio texto altera ("A Lei nº X passa a vigorar...", "Ficam revogados ... da Lei Y")
+        e que o Senado não registrou."""
+        try:
+            doc = self.documento(norma)
+        except Exception as e:  # o texto é complemento; sem ele fica só o Senado
+            log.info("Texto de %s indisponível: %s", norma.nome, e)
+            return []
+        ja_fam = {_familia(c) for c in ja}
+        achadas: dict[str, str] = {}
+        ativo = False  # o artigo corrente altera/revoga outras normas
+        for b in doc.blocos:
+            if b.tipo != "dispositivo" or b.espaco:
+                continue
+            texto_b = b.crua()  # inclui o riscado: MP que perdeu a eficácia também alterou normas
+            if len(b.chave) == 1:
+                ativo = bool(re.search(r"passa(?:m)?\s+a\s+vigorar|ficam?\s+revogad|acrescid[oa]s?\s+d|"
+                                       r"revoga(?:m)?(?:-se)?\s", texto_b, re.I))
+            if not ativo:
+                continue
+            # sem as notas do Planalto ("Redação dada pela Lei Y" cita quem alterou ESTA norma)
+            t = re.sub(r"\((?:Reda[çc][ãa]o dada|Inclu[íi]d|Revogad|Vide|Vig[êe]ncia|Produ[çc]|Acrescid|Renumerad|"
+                       r"Regulamento|Promulga)[^)]*\)", " ", texto_b)
+            for c in citacoes_de_normas(t):
+                if c != norma.chave and _familia(c) not in ja_fam and c not in achadas:
+                    achadas[c] = self._nome(c)
+        return list(achadas.values())[:60]
+
+    def _familia_mp(self, chave: str, cache: dict | None = None) -> str:
+        """Como _familia, mas também junta linhagens renumeradas (MP 542 -> ... -> MP 1.027) pela tabela de
+        reedições dos quadros do Planalto."""
+        f = _familia(chave)
+        if f == chave or not f.startswith("MPV:"):
+            return f
+        if cache is not None and chave in cache:
+            return cache[chave]
+        final = self.db.familia_mp(Referencia.de_chave(chave).numero)
+        r = _familia(final) if final else f
+        if cache is not None:
+            cache[chave] = r
+        return r
 
     def _nome(self, chave: str) -> str:
         try:
@@ -891,8 +1077,7 @@ class Legislacao:
         if direcao not in ("recebidas", "feitas"):
             raise ValueError("direcao deve ser 'recebidas' ou 'feitas'.")
         desde = ler_data(desde, "desde")
-        _ref, disp_citado = interpretar_citacao(referencia)
-        dispositivo = dispositivo or disp_citado
+        dispositivo = self._dispositivo_pedido(referencia, dispositivo)
         norma = self.resolver(referencia)
         det, aviso = self.obter_detalhe(norma, max_idade=24 * 3600)
         if not det:
@@ -903,10 +1088,14 @@ class Legislacao:
             return {"norma": norma.nome, "aviso": f"Não entendi o dispositivo '{dispositivo}'. Ex.: 'art. 74, § 12'."}
         alvo_adct = norma.tipo == "CF" and _e_adct(dispositivo)
         grupos: dict[str, dict] = {}
+        fam: dict = {}
+        sem_dispositivo: set[str] = set()
         for r in rels:
             classe = classificar_relacao(r)
             if not incluir_correlatas and classe in ("correlata", "vetada"):
                 continue
+            if classe == "altera" and direcao == "recebidas" and r.origem.startswith("DEC:") and norma.tipo != "DEC":
+                classe = "decreto (remissão/regulamento; decreto não altera lei)"
             if desde and (r.data or "") < desde:
                 continue
             disp_r = r.dispositivo.strip()
@@ -916,6 +1105,8 @@ class Legislacao:
                     # sem itens, só interessa ao dispositivo o que atinge a norma toda (revogação no todo,
                     # perda de eficácia...); "Declaração de Alteração" genérica não diz o que mudou
                     if not _decl_forte(r):
+                        if classe == "altera":
+                            sem_dispositivo.add(r.origem if direcao == "recebidas" else r.destino)
                         continue
                 else:
                     if norma.tipo == "CF" and _e_adct(disp_r) != alvo_adct:
@@ -923,7 +1114,7 @@ class Legislacao:
                     if not dispositivo_casa(alvo, chave_dispositivo(disp_r)):
                         continue
             outra = r.origem if direcao == "recebidas" else r.destino
-            chave_g = _familia(outra)  # reedições de MP (pré-2001) num grupo só
+            chave_g = self._familia_mp(outra, fam)  # reedições de MP (pré-2001) num grupo só
             g = grupos.setdefault(chave_g, {
                 "norma": self._nome(outra), "chave": outra, "data": r.data, "declaracao": r.declaracao,
                 "dispositivos": [], "_classes": set(), "_edicoes": set(),
@@ -945,7 +1136,7 @@ class Legislacao:
                 g["reedicoes"] = len(edicoes)
                 g["norma"] += f" (última de {len(edicoes)} edições da MP)"
             g["dispositivos"] = g["dispositivos"][:30]
-            if classes & {"altera"} or (direcao == "feitas" and not classes - {"altera", "outra"}):
+            if "altera" in classes:
                 alteracoes.append(g)
             else:
                 g["tipo"] = ", ".join(sorted(classes))
@@ -966,6 +1157,19 @@ class Legislacao:
             "alteracoes": alteracoes,
             "fonte": "Senado Federal - Dados Abertos (vides)",
         }
+        sem_dispositivo -= {g["chave"] for g in alteracoes}
+        if sem_dispositivo:
+            out["alteracoes_sem_dispositivo"] = sorted(self._nome(c) for c in sem_dispositivo)
+            out["nota_sem_dispositivo"] = ("O Senado registra que estas normas alteraram a norma, mas sem dizer quais "
+                                           "dispositivos: podem ter atingido o dispositivo pedido. Confira nas notas "
+                                           "do texto (ler_norma).")
+        if direcao == "feitas":
+            extras = self._alteradas_no_texto(norma, {g["chave"] for g in alteracoes + outras})
+            if extras:
+                out["citadas_em_clausulas_de_alteracao_sem_registro_no_senado"] = extras
+            out["nota_feitas"] = ("Lista do Senado (vides), que pode estar incompleta sobretudo em normas recentes; "
+                                  "'citadas_em_clausulas_de_alteracao_sem_registro_no_senado' vem do próprio texto "
+                                  "('passa a vigorar', 'ficam revogados').")
         if outras:
             out["outras_relacoes"] = outras
             out["nota_outras"] = ("Ressalvas, regulamentações, novo tratamento da matéria e conversões/reedições "
@@ -1225,18 +1429,28 @@ class Legislacao:
         max_idade=0 revalida com ETag/Last-Modified: barato quando nada mudou."""
         h = hoje()
         ano_ini = h.year - 1 if h.month <= 2 else h.year
-        n = 0
+        n, falhas, ok = 0, [], 0
         with self.sincronizando:
             for tipo in TIPOS_CATALOGO:
                 if tipo in ("DEL", "LDL"):
                     continue
+                f_tipo: list = []
+                t_tipo = time.time()
                 try:
-                    es = self.indices.entradas(tipo, ano_inicio=ano_ini, max_idade=max_idade)
+                    es = self.indices.entradas(tipo, ano_inicio=ano_ini, max_idade=max_idade, falhas=f_tipo)
                 except ErroHTTP as e:
                     log.warning("Falha ao atualizar quadro %s: %s", tipo, e)
+                    falhas.append(tipo)
                     continue
+                if f_tipo or any(t >= t_tipo for u, t in list(self.http.copias_entregues.items())
+                                 if "planalto.gov.br" in u):
+                    falhas.append(tipo)
+                else:
+                    ok += 1
                 n += self._salvar_entradas(es)
-        self.db.set_meta("recentes_em", agora())
+        if ok:
+            self.db.set_meta("recentes_em", agora())
+        self.ultimas_falhas_recentes = falhas
         return n
 
     def novidades(self, desde: str | None = None, dias: int = 30, tipos: list[str] | None = None,
@@ -1252,9 +1466,16 @@ class Legislacao:
         tipos = normalizar_tipos(tipos)
         limite = max(1, min(int(limite), 500))
         aviso = []
+        revalidado = True
         try:
-            self.atualizar_recentes()
+            self.atualizar_recentes(max_idade=900)  # quadros relidos há menos de 15 min valem
+            if self.ultimas_falhas_recentes:
+                revalidado = False
+                aviso.append("Não foi possível reler agora os quadros do Planalto de: "
+                             + ", ".join(self.ultimas_falhas_recentes) + ". Normas publicadas nos últimos dias "
+                             "podem faltar; usando o catálogo local.")
         except Exception as e:  # o catálogo local ainda serve
+            revalidado = False
             aviso.append(f"Não foi possível reler os quadros do Planalto agora ({e}); usando o catálogo local.")
         normas = self.db.recentes(desde, tipos)
         if tema or termos:
@@ -1281,7 +1502,8 @@ class Legislacao:
             "desde": desde,
             "total": len(saida),
             "normas": saida[:limite],
-            "fonte": "Quadros de legislação do Planalto (revalidados agora)",
+            "fonte": ("Quadros de legislação do Planalto (revalidados agora)" if revalidado else
+                      "Catálogo local (os quadros do Planalto não puderam ser relidos agora)"),
         }
         if len(saida) > limite:
             out["observacao"] = f"Mostrando {limite} de {len(saida)}; aumente `limite` para ver todas."

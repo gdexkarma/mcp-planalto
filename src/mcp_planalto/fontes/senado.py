@@ -85,19 +85,29 @@ class DetalheSenado:
     dispositivos: list[dict] = field(default_factory=list)  # por dispositivo: [{dispositivo, refs:[...]}]
 
 
-def _situacao(vides: list[etree._Element]) -> str | None:
+def _situacao(vides: list[etree._Element], data_norma: str | None = None) -> str | None:
     """Situação da norma a partir das declarações do Senado.
 
     Declarações permanentes prevalecem. Revogação "provisória" (feita por MP) não torna a norma
-    revogada: se a MP caducar, a norma volta a valer; só é informada se nada mais houver.
+    revogada: se a MP caducar, a norma volta a valer; só é informada se nada mais houver. Revigoração
+    posterior à revogação devolve a norma à vigência.
     """
     permanentes, provisorias = [], []
     for v in vides:
         dec = _txt(v, "comentario").lower()
         nome = _txt(v, "nomeNormaPosterior")
+        data_v = _data_br(_txt(v, "datAssinatura")) or ""
+        if data_norma and data_v and data_v < data_norma:  # erro de cadastro ("Decreto 7.212 de 08/03/1879")
+            nome, data_v = re.sub(r"\s+de\s+\d{2}/\d{2}/\d{4}$", "", nome), ""
         rotulo = None
+        if "disposições em contrário" in dec or "disposicoes em contrario" in dec:
+            continue  # "revoga as disposições em contrário": não revoga a norma inteira
+        if ("revigoração" in dec or "repristina" in dec) and "no todo" in dec:
+            (provisorias if "provis" in dec else permanentes).append((data_v, ""))  # volta a valer
+            continue
         if "revogação" in dec and "no todo" in dec and "retirada" not in dec:
-            rotulo = f"Revogada ({nome})"
+            rotulo = (f"Revogada com ressalvas, partes em vigor ({nome})" if "ressalva" in dec
+                      else f"Revogada ({nome})")
         elif "conversão em lei" in dec:
             rotulo = f"Convertida em lei ({nome})"
         elif ("perda de eficácia" in dec and "parcial" not in dec) or "caducidade" in dec or "rejeição" in dec:
@@ -106,12 +116,12 @@ def _situacao(vides: list[etree._Element]) -> str | None:
             rotulo = f"Vigência encerrada ({nome})" if nome else "Vigência encerrada"
         if not rotulo:
             continue
-        (provisorias if "provis" in dec else permanentes).append((_data_br(_txt(v, "datAssinatura")) or "", rotulo))
+        (provisorias if "provis" in dec else permanentes).append((data_v, rotulo))
     if permanentes:
-        return max(permanentes)[1]  # a mais recente
+        return max(permanentes)[1] or None  # a mais recente ("" = revigorada)
     if provisorias:
         data, rotulo = max(provisorias)
-        return rotulo.replace("Revogada (", "Revogação provisória por MP, conferir se a MP foi convertida (")
+        return rotulo.replace("Revogada (", "Revogação provisória por MP, conferir se a MP foi convertida (") or None
     return None
 
 
@@ -199,7 +209,7 @@ def ler_detalhe(xml: bytes, numero: str | None = None) -> DetalheSenado | None:
         urn = m.group(1)
     norma = Norma(
         chave=ref.chave, tipo=ref.tipo, numero=ref.numero, ano=ref.ano, data=data,
-        ementa=_txt(d, "ementa") or None, apelido=apelido, situacao=_situacao(vides),
+        ementa=_txt(d, "ementa") or None, apelido=apelido, situacao=_situacao(vides, data),
         senado_id=d.get("id"), urn=urn, indexacao=_frases(d, "indexacao/frase") or None,
         catalogo=_frases(d, "catalogo/frase") or None, observacao=_txt(d, "observacao") or None,
         publicacao=" | ".join(p for p in pubs if p) or None, origem="senado",
@@ -207,7 +217,12 @@ def ler_detalhe(xml: bytes, numero: str | None = None) -> DetalheSenado | None:
     det = DetalheSenado(norma)
 
     det.relacoes_recebidas = _relacoes_de_vides(vides, ref.chave, norma.senado_id, data)
-    for v in d.findall("edivs/ediv"):
+    edivs = d.findall("edivs/ediv")
+    com_itens_e = {_txt(v, "codnormaAnterior") or _txt(v, "nomeNormaAnterior") for v in edivs if v.findall("itens/item")}
+    edivs = [v for v in edivs if v.findall("itens/item")
+             or (_txt(v, "codnormaAnterior") or _txt(v, "nomeNormaAnterior")) not in com_itens_e
+             or _RE_DECL_FORTE.search(_txt(v, "comentario"))]
+    for v in edivs:
         destino = ref_de_nome(_txt(v, "nomeNormaAnterior"))
         if not destino:
             continue
@@ -256,12 +271,23 @@ class Senado:
         self.http = http
 
     def _get(self, url: str, max_idade: float | None) -> bytes | None:
+        """XML do Senado; None = a norma não está na base (404 ou resposta XML válida sem documento).
+        Página de erro, corpo vazio ou XML quebrado viram ErroHTTP (e saem do cache), nunca "sem registro"."""
         try:
-            return self.http.get(url, max_idade=max_idade, aceitar="application/xml").corpo
+            corpo = self.http.get(url, max_idade=max_idade, aceitar="application/xml").corpo
         except ErroHTTP as e:
             if e.status == 404:
                 return None
             raise
+        try:
+            raiz = etree.fromstring(corpo)
+        except (etree.XMLSyntaxError, ValueError) as e:
+            self.http.esquecer(url)
+            raise ErroHTTP(url, None, f"Resposta inválida do Senado ({type(e).__name__})") from e
+        if raiz is None or not isinstance(raiz.tag, str) or "<html" in corpo[:500].decode("latin-1").lower():
+            self.http.esquecer(url)
+            raise ErroHTTP(url, None, "Resposta inesperada do Senado")
+        return corpo
 
     def detalhe(self, ref: Referencia, max_idade: float | None = 24 * 3600) -> DetalheSenado | None:
         if ref.tipo == "CF":

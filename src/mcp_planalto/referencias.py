@@ -52,7 +52,13 @@ _BLOQUEIO = re.compile(
     r"decreto do conselho|sumula|acordao|convenio|deliberacao|lei organica|adi|adc|adpf)\b"
 )
 # Qualificadores colados à norma: "Lei Estadual 6.374", "Constituição do Estado de São Paulo".
-_QUALIFICADOR = re.compile(r"[^,;()]{0,25}?\b(estadual|municipal|distrital|do estado|do municipio|do distrito)\b")
+_ESTADOS = (r"sao paulo|rio de janeiro|minas gerais|bahia|parana|rio grande do sul|rio grande do norte|santa catarina|"
+            r"pernambuco|ceara|goias|espirito santo|para|amazonas|maranhao|mato grosso(?: do sul)?|paraiba|alagoas|"
+            r"sergipe|piaui|tocantins|rondonia|acre|amapa|roraima|distrito federal")
+_UFS = r"sp|rj|mg|ba|pr|rs|rn|sc|pe|ce|go|es|pa|am|ma|mt|ms|pb|al|se|pi|to|ro|ac|ap|rr|df"
+_QUALIFICADOR = re.compile(
+    r"[^,;()]{0,25}?\b(estadual|municipal|distrital|do estado|do municipio|do distrito|"
+    rf"(?:de|do|da)\s+(?:{_ESTADOS})\b|(?:de|do|da|-|/)\s*(?:{_UFS})\b(?!\.?\s*\d))")
 _NUMERO_APOS = r"\s*(?:n\.?\s*[º°o]?s?\.?\s*)?(?=\d)"
 
 # Apelidos usuais na prática tributária.
@@ -195,7 +201,9 @@ class Referencia:
 
 _RE_NUM = re.compile(
     r"(?:n\.?\s*[º°o]?s?\.?\s*)?(?P<num>\d{1,3}(?:\.\d{3})+|\d+)(?P<reed>-[a-z](?![a-z])|-\d+)?"
-    r"(?:\s*(?:/|,?\s*de\s+(?:\d{1,2}(?:º|°)?\s+de\s+[a-zç]+\s+de\s+|\d{1,2}[./-]\d{1,2}[./-])?|\s+)"
+    # depois de "/" o número é sempre o ano ("Lei 6.374/89 de São Paulo")
+    r"(?:\s*/\s*(?P<ano_barra>[12]\.\d{3}|\d{4}|\d{2})(?!\d)"
+    r"|(?:,?\s*de\s+(?:\d{1,2}(?:º|°)?\s+de\s+[a-zç]+\s+de\s+|\d{1,2}[./-]\d{1,2}[./-])?|\s+)"
     # ano: "1996", "96", "1.996"; nunca o dia de "de 27 de dezembro"
     r"(?P<ano>[12]\.\d{3}|\d{4}|\d{2})(?!\d)(?!\s*[º°]?\s+de\s+[a-z]))?",
 )
@@ -285,7 +293,7 @@ def interpretar_citacao(texto: str) -> tuple[Referencia, str | None]:
         m = _RE_NUM.match(n, fim)
         numero = m.group("num").replace(".", "").lstrip("0") or "0"
         reed = m.group("reed")
-        bruto_ano = m.group("ano")
+        bruto_ano = m.group("ano") or m.group("ano_barra")
         if reed and tipo != "MPV" and reed[1:].isdigit() and not bruto_ano and len(reed) in (3, 5):
             bruto_ano, reed = reed[1:], None  # "Lei 9.430-96": o sufixo é o ano
         if reed:
@@ -416,7 +424,8 @@ def chave_dispositivo(texto: str) -> tuple:
             num = v if v.isdigit() else str(romano_para_int(v) or v)
             partes.append(("inc", num + (mm.group(2) or "")))
         elif mm := re.fullmatch(r"item\s+(\d+)", tok):
-            partes.append(("item", mm.group(1)))
+            # o Senado chama de "Item" o inciso das leis antigas ("Art. 22, caput, Item 1" = art. 22, I)
+            partes.append(("item" if ja_inc else "inc", mm.group(1)))
     if caput_final and len(partes) == 1:
         partes.append(("caput", ""))
     return tuple(partes)

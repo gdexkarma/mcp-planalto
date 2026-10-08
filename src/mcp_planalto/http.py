@@ -48,6 +48,7 @@ class Resposta:
     cabecalhos: dict[str, str]
     obtido_em: float  # epoch da última confirmação junto ao servidor
     do_cache: bool = False
+    falha: str | None = None  # cópia em cache entregue porque o portal não respondeu agora
 
     @property
     def last_modified(self) -> str | None:
@@ -110,6 +111,7 @@ class ClienteHTTP:
         self._ultimo: dict[str, float] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._falhas: dict[str, tuple[int, float]] = {}  # host -> (falhas seguidas, quando)
+        self.copias_entregues: dict[str, float] = {}  # url -> quando a cópia local foi usada por falha do portal
         self._lock = threading.Lock()
         if cache_dir:
             cache_dir.mkdir(parents=True, exist_ok=True)
@@ -218,7 +220,10 @@ class ClienteHTTP:
 
         host = urlsplit(url).hostname or ""
         tentativas = 1 if self._host_fora(host) else self.tentativas
-        limite = time.monotonic() + self.prazo_total
+        prazo = self.prazo_total
+        if cache:  # há cópia para entregar: não vale prender o usuário por 90 s esperando o portal
+            tentativas, prazo = min(tentativas, 2), min(prazo, 20.0)
+        limite = time.monotonic() + prazo
         ultimo_erro: Exception | None = None
         status_erro: int | None = None
         for tentativa in range(tentativas):
@@ -242,6 +247,8 @@ class ClienteHTTP:
                     cache.do_cache = False
                     self._gravar_cache(url, cache)
                     return cache
+                if e.code == 404:
+                    raise ErroHTTP(url, 404, "Página não encontrada (link removido ou incorreto)") from e
                 if e.code not in (408, 429, 500, 502, 503, 504):
                     raise ErroHTTP(url, e.code, "Erro HTTP") from e
                 ultimo_erro, status_erro = e, e.code
@@ -250,6 +257,8 @@ class ClienteHTTP:
                     espera_servidor = min(60.0, float(ra))
             except (urllib.error.URLError, http.client.HTTPException, zlib.error, EOFError, OSError) as e:
                 ultimo_erro = e
+                if tentativa == 0:
+                    self._registrar(host, False)  # conta tentativas: o circuito de "portal fora" abre mais cedo
             if tentativa == tentativas - 1:
                 break
             pausa = espera_servidor or min(20.0, (2 ** tentativa) + random.random())
@@ -261,6 +270,9 @@ class ClienteHTTP:
         self._registrar(host, False)
         if cache:  # rede indisponível: devolve a última cópia conhecida
             log.warning("Usando cópia em cache de %s após falhas: %s", url, ultimo_erro)
+            self.copias_entregues[url] = time.time()
+            cache.falha = (f"o portal não respondeu agora ({type(ultimo_erro).__name__}); usando a cópia local de "
+                           + time.strftime("%d/%m/%Y %H:%M", time.localtime(cache.obtido_em)))
             return cache
         raise ErroHTTP(url, status_erro, f"Portal indisponível ({ultimo_erro})")
 
