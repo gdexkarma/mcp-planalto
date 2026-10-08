@@ -20,6 +20,8 @@
 | `AVISO: Você pediu a MP X; ... o texto é o da última edição da família` | MP reeditada (antes de 2001). | Avisar que a redação de uma edição intermediária pode ter sido outra. |
 | `AVISO: O Planalto mostra mais de uma redação sem risco` | Erro de compilação do Planalto. | Em geral vale a última (nota "Redação dada" mais recente); recomendar conferir no DOU. |
 | `Aviso: Não foi possível conferir agora, no Senado...` | O alerta de alteração não incorporada não pôde ser checado. | Se a atualidade importar, rodar `verificar_atualizacao` depois. |
+| `Vigência da [lei], que deu a redação de ...` | Cláusula de vigência da lei recente (até ~2 anos) que deu a redação lida. | Ver qual inciso da cláusula alcança o dispositivo; procurar regras de transição na mesma lei. |
+| `AVISO: a cláusula de vigência ... menciona efeitos em data futura` | A data pode valer só para parte da lei. | Confirmar na cláusula se alcança o dispositivo; se alcançar, responder com as duas redações. |
 | `Contexto (dispositivo superior)` | Caput/parágrafo/inciso a que o trecho lido pertence. | Ler junto: o inciso sozinho pode inverter o sentido ("exceto", "não se aplica"). |
 | `Notas de vigência da norma` | "(Vide Lei X)" recentes do cabeçalho, que valem para todo o texto. | Se citar lei recente, verificar se afeta o ponto. |
 | `Situação` | Revogada, convertida, sem eficácia, em vigor por força da EC 32. | Repassar. |

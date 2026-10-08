@@ -41,7 +41,25 @@ Fluxo recomendado:
 - Antes de afirmar que um texto está vigente e atualizado: verificar_atualizacao(...).
 - Para levantar o acervo de um tema (ex.: IRPJ): mapear_tema("IRPJ"); gera planilha.
 - Para acompanhar publicações: novidades_legislativas(dias=7, tema="IRPJ").
-Cite sempre a norma e o dispositivo. O texto do Planalto não substitui o publicado no DOU.
+
+Antes de responder sobre texto, alíquota, prazo ou vigência (mesmo de lei "conhecida", pois a memória erra
+justamente nas redações recentes):
+1. Leia o dispositivo pedido (ler_norma com dispositivo=) e o "Contexto" a que ele se liga.
+2. Se houver ALERTA ou AVISO, comece por ele e separe o que vale hoje do que valerá a partir da data.
+3. Redação dada por lei recente: o cabeçalho traz a cláusula de vigência dessa lei ("Vigência da ...").
+   Use a data de efeitos dela e procure regras de transição na mesma lei
+   (ler_norma(lei_nova, termo="a partir de")).
+4. Conclusão que depende de o texto estar em dia (parecer, cálculo, prazo): verificar_atualizacao.
+5. MP: consultar_norma (convertida em qual lei, ou sem eficácia, com a data e o ato).
+6. Alíquota, presunção ou benefício: uma lei posterior pode mudar a aplicação sem alterar o texto; procure
+   com novidades_legislativas/buscar_normas pelo tema e diga que procurou.
+
+Se o usuário contestar ou pedir para conferir, refaça a verificação na fonte (ler_norma, historico_alteracoes,
+verificar_atualizacao e as leis alteradoras), em vez de revisar a resposta de memória; diga o que mudou e
+cite o trecho decisivo. Para conferir as citações de um parecer, faça isso para cada citação e monte uma
+tabela citação × resultado. Para tema livre em mapear_tema, informe normas_extras com as leis-base.
+Cite sempre a norma, o dispositivo e a nota de origem da redação. O texto do Planalto não substitui o
+publicado no DOU.
 """
 
 _instancia: "Legislacao | None" = None
@@ -167,15 +185,19 @@ async def ler_norma(
     cab.append(f"Fonte: {r['url']}" + (f" (página atualizada no Planalto em {r['planalto_atualizado_em']})"
                                        if r.get("planalto_atualizado_em") else ""))
     for k, rot in (("aviso_rede", "AVISO"), ("aviso_edicao", "AVISO"), ("aviso_situacao", "AVISO"),
-                   ("alerta", "ALERTA"), ("aviso_duplicidade", "AVISO"), ("aviso_senado", "Aviso")):
+                   ("alerta", "ALERTA"), ("aviso_vigencia", "AVISO"), ("aviso_duplicidade", "AVISO"),
+                   ("aviso_senado", "Aviso")):
         if r.get(k):
-            cab.append(f"{rot}: {r[k]}")
+            cab.append(f"{rot}: {r[k][0].upper() + r[k][1:]}")
     for f in r.get("efeitos_futuros", []):
         if f.get("redacao_ainda_aplicavel"):
             cab.append(f"Redação que ainda se aplica ao {f.get('dispositivo') or 'dispositivo'} até "
                        f"{f['data'][8:10]}/{f['data'][5:7]}/{f['data'][:4]}: {f['redacao_ainda_aplicavel']}")
     if r.get("contexto"):
         cab.append(f"Contexto (dispositivo superior): {r['contexto']}")
+    for v in r.get("vigencia_das_leis_alteradoras", []):
+        cab.append(f"Vigência da {v['norma']}, que deu a redação de {', '.join(v['dispositivos']) or 'parte do trecho'} "
+                   f"({v['artigo']}; confira também regras de transição nela): {v['clausula']}")
     for k, rot in (("observacao_numeracao", "Numeração"), ("notas_gerais", "Notas"),
                    ("notas_de_vigencia_da_norma", "Notas de vigência da norma (valem para todo o texto)"),
                    ("anexos", "Anexos")):

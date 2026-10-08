@@ -30,8 +30,9 @@ Percorra estes pontos; cada um corresponde a um erro real observado em teste:
 2. **Há ALERTA ou AVISO no cabeçalho?** Se houver, a resposta começa por ele e separa "o que vale hoje" de
    "o que valerá a partir de [data]".
 3. **A redação ou a norma é recente (últimos ~2 anos)?** Então leia também a **lei que a trouxe**:
-   - a **cláusula de vigência** dela (`ler_norma(lei_nova, termo="vigor")` ou o último artigo) — "entra em
-     vigor na data da publicação" não basta se houver "produz efeitos a partir de";
+   - a **cláusula de vigência** dela — `ler_norma` já a mostra no cabeçalho ("Vigência da Lei X..."); confira
+     qual inciso dela alcança o dispositivo lido. "Entra em vigor na data da publicação" não basta se houver
+     "produz efeitos a partir de";
    - as **regras de transição** (escalonamentos por ano, "até 31 de dezembro de...", "a partir do exercício")
      — `ler_norma(lei_nova, termo="a partir de")` ajuda a achar.
    Foi aqui que as respostas do teste perderam pontos: dar a data de vigência sem o escalonamento, ou a

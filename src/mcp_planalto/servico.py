@@ -847,6 +847,21 @@ class Legislacao:
                                        f"{_data_br(f['data'])}; até lá vale a redação anterior"
                                        + (" (em 'redacao_ainda_aplicavel')" if f.get("redacao_ainda_aplicavel")
                                           else " (use modo='historico')"))
+            try:
+                vig_alt = self._vigencia_das_alteradoras(doc, blocos)
+            except Exception as e:  # complemento, como os efeitos futuros
+                log.warning("Falha ao ler a vigência das alteradoras de %s: %s", norma.nome, e)
+                vig_alt = []
+            if vig_alt:
+                cab["vigencia_das_leis_alteradoras"] = vig_alt
+                ja = {f["norma"] for f in futuros}
+                datas = [f"{v['norma']} ({v['artigo']}): {_data_br(v['data_futura'])}" for v in vig_alt
+                         if v.get("data_futura") and v["norma"] not in ja]
+                if datas:
+                    cab["aviso_vigencia"] = ("a cláusula de vigência de norma que deu a redação lida menciona efeitos "
+                                             "em data futura — " + "; ".join(datas) + ". Confira na cláusula se a "
+                                             "data alcança este dispositivo; se alcançar, até lá vale a redação "
+                                             "anterior (modo='historico')")
             pend = self._alteracoes_nao_refletidas(norma, dispositivo, blocos, doc)
             for mp in self._mps_sem_eficacia_nas_notas(blocos):
                 alertas.append(f"a redação de parte do trecho veio da {mp[0]}, que não está mais em vigor ({mp[1]}) e "
@@ -956,6 +971,57 @@ class Legislacao:
                     if not any(o.get("clausula") == item["clausula"] and o.get("dispositivo") == item["dispositivo"]
                                for o in out):
                         out.append(item)
+        return out
+
+    def _vigencia_das_alteradoras(self, doc: Documento, blocos: list, anos: int = 2, maximo: int = 3,
+                                  prazo: float = 12.0) -> list[dict]:
+        """Cláusula de vigência das normas recentes que deram a redação lida ("Redação dada/Incluído pela Lei X,
+        de 2025"). A data de efeitos e o escalonamento costumam estar nela, e não na nota do compilado."""
+        inicio, ano_min = time.time(), hoje().year - anos
+        por_url: dict[str, list[str]] = {}
+        for b in blocos:
+            if b.obsoleto or b.revogado or not b.vigente:
+                continue
+            for texto, href, _ctx in b.links:
+                t = normalizar(texto)
+                if not re.match(r"\(?\s*(redacao dada|incluid|acrescid|renumerad)", t):
+                    continue
+                if not any(int(a) >= ano_min for a in re.findall(r"\b(?:19|20)\d\d\b", texto)):
+                    continue
+                url = href.partition("#")[0]
+                if not url or url.lower() == doc.url.split("#")[0].lower():
+                    continue
+                rot = rotulo_dispositivo(b.chave) if b.chave else None
+                lista = por_url.setdefault(url, [])
+                if rot and rot not in lista:
+                    lista.append(rot)
+        out = []
+        for url, dispositivos in list(por_url.items())[:maximo]:
+            if time.time() - inicio > prazo:
+                break
+            try:
+                alt = self._doc_por_url(url)
+            except Exception as e:  # portal fora ou link quebrado: segue sem a cláusula
+                log.info("Norma alteradora indisponível (%s): %s", url, e)
+                continue
+            clausula, art = None, None
+            for a in reversed(alt.artigos("")[-10:]):
+                txt = _espacos_txt(" ".join(x.vigente for x in alt.selecionar(f"art. {a}") if not x.obsoleto))
+                if re.search(r"entr(a|ara|am|arao) em vigor|produz(ira|em|irao|indo)? efeitos?|vigencia",
+                             normalizar(txt)):
+                    # sem o fecho ("Belém, 21 de novembro de 2025; 204º da Independência..." e assinaturas)
+                    clausula = re.split(r"\s[A-ZÀ-Ú][\w\s-]{1,40}, (?:em )?\d{1,2}º? de \w+ de \d{4}[;.]", txt)[0]
+                    art = a
+                    break
+            if not clausula:
+                continue
+            item = {"norma": _nome_da_epigrafe(alt.epigrafe) or url.rsplit("/", 1)[-1],
+                    "artigo": rotulo_dispositivo((("art", art),)), "dispositivos": dispositivos[:8],
+                    "clausula": clausula[:1500], "url": alt.url}
+            d = data_efeitos(clausula, data_de_publicacao(alt.epigrafe))
+            if d and d > hoje():
+                item["data_futura"] = d.isoformat()
+            out.append(item)
         return out
 
     def _mps_sem_eficacia_nas_notas(self, blocos: list) -> list[tuple[str, str]]:
