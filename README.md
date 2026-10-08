@@ -89,16 +89,42 @@ Na primeira vez que o servidor sobe, ele monta sozinho, em segundo plano, o **ca
 
 A cada início, se a última leitura tiver mais de 6 horas, o servidor relê os quadros do ano corrente. `novidades_legislativas` sempre relê na hora.
 
-Para a **busca e o mapeamento temático com cobertura máxima**, baixe também a indexação e as alterações do Senado de cada norma. A primeira carga leva algumas horas e é retomável (pode ser interrompida e continuada):
+### Carga de detalhes do Senado (`--detalhes`)
+
+O catálogo básico traz número, data, ementa e link de cada norma. A carga de detalhes acrescenta, para cada lei, LC, decreto-lei, MP, EC e lei delegada, duas informações do Senado:
+
+- **indexação temática**: termos atribuídos por documentalistas, como "LUCRO REAL" ou "JUROS SOBRE O CAPITAL PRÓPRIO". A ementa de lei tributária costuma ser genérica ("Altera a legislação tributária federal…"); sem a indexação, essas leis não aparecem numa busca por assunto;
+- **grafo de alterações**: quem alterou quem, por dispositivo.
 
 ```bash
-mcp-planalto sincronizar --detalhes                   # leis, LCs, DLs, MPs, ECs
+mcp-planalto sincronizar --detalhes                                # leis, LCs, DLs, MPs, ECs
 mcp-planalto sincronizar --detalhes --tipos DEC --desde-ano 2000   # decretos, se quiser
 ```
 
-Sem isso o mapeamento temático continua funcionando, porque segue o grafo de alterações a partir das normas-núcleo e baixa sob demanda o que precisa. A busca por indexação é que fica restrita às normas já detalhadas.
+É retomável: pode ser interrompida (Ctrl+C) e continuada depois, recomeçando de onde parou. Roda na sua máquina, consulta só a API pública do Senado e **não consome tokens do Claude**.
 
-Os dados ficam em `~/.mcp-planalto` (catálogo SQLite, cache HTTP e planilhas exportadas).
+| Precisa do `--detalhes` | Funciona sem ele |
+|---|---|
+| `buscar_normas` por assunto (sem ele, "lucro real" acha 12 normas; "IRRF" e "transação tributária", nenhuma) | `ler_norma`, `estrutura_norma` |
+| camada "relacionada" do `mapear_tema` e contagens por tema | `consultar_norma`, `historico_alteracoes`, `verificar_atualizacao` (buscam no Senado só a norma consultada, na hora) |
+| `novidades_legislativas` com tema rápido (sem ele, até 60 consultas ao Senado por chamada, ~30 s) | camada "alteradora" do `mapear_tema` (consulta só as normas-núcleo) |
+
+Depois da primeira carga, rodar de novo (por exemplo, uma vez por semana) processa só as normas que entraram no catálogo desde então, em poucos minutos.
+
+### Espaço em disco e tempo
+
+Medido em outubro de 2026, com 54.668 normas no catálogo. A linha do `--detalhes` foi extrapolada de uma amostra aleatória de 400 das 20.996 normas que ele processa (2,97 normas/s; cerca de 11 relações de alteração por norma).
+
+| Etapa | Tempo | Banco (`legislacao.db`) | Cache (`cache/`) |
+|---|---|---|---|
+| Catálogo básico (automático na primeira execução) | ~4 min | 54 MB | 15 MB |
+| `--detalhes` (leis, LCs, DLs, MPs, ECs) | ~2 a 3 h | +76 MB | +60 MB |
+| `--detalhes --tipos DEC --desde-ano 2000` (estimativa, não medida) | ~1 h | +35 MB | +30 MB |
+| **Total típico (catálogo + detalhes, sem decretos)** | | **~130 MB** | **~75 MB** |
+
+O cache cresce também com as normas lidas: cada página do Planalto fica guardada comprimida, de poucos KB até ~350 KB (a LC 214/2025, de 5,4 MB, ocupa 345 KB). Apagar a pasta `cache/` libera espaço sem perder nada; as páginas são baixadas de novo quando necessário.
+
+Os dados ficam em `~/.mcp-planalto` (ou em `MCP_PLANALTO_HOME`): catálogo SQLite, cache HTTP e planilhas exportadas.
 
 ---
 
