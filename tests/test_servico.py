@@ -154,6 +154,9 @@ def test_cita_norma():
     assert not cita_norma("Lei Complementar nº 9.430", lei)
     assert cita_norma("Decreto-Lei nº 2.848, de 1940", Referencia("DEL", "2848", 1940))
     assert not cita_norma("Decreto-Lei nº 2.848, de 1940", Referencia("LEI", "2848", 1956))
+    assert cita_norma("(Incluído pela Emenda Constitucional nº 45, de 2004)", Referencia("EMC", "45", 2004))
+    assert cita_norma("(Redação dada pela Lei Complementar nº 227, de 2026)", Referencia("LCP", "227", 2026))
+    assert cita_norma("(Incluído pela Medida Provisória nº 2.158-35, de 2001)", Referencia("MPV", "2158-35", 2001))
 
 
 def test_ementa_altera():

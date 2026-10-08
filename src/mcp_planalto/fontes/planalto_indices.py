@@ -96,8 +96,8 @@ def _numero_do_arquivo(url: str | None) -> int | None:
     if not url:
         return None
     nome = url.rsplit("/", 1)[-1]
-    m = re.search(r"(\d+)", nome)
-    return int(m.group(1)) if m else None
+    m = re.search(r"(\d{1,3}(?:\.\d{3})+(?=\D)|\d+)", nome)  # "L10.978.htm" usa ponto de milhar
+    return int(m.group(1).replace(".", "")) if m else None
 
 
 _RE_LIXO_EMENTA = re.compile(

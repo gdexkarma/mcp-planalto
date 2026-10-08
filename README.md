@@ -23,16 +23,18 @@ Com isso, um assistente (Claude Desktop, Claude Code ou qualquer cliente MCP) co
 
 | Ferramenta | Para quê |
 |---|---|
-| `ler_norma` | Texto atualizado de uma norma ou de um dispositivo (`"art. 74, § 12"`, `"arts. 15 a 20"`), modo vigente ou histórico, busca por termo dentro da norma, paginação. |
+| `ler_norma` | Texto atualizado de uma norma ou de um dispositivo (`"art. 74, § 12"`, `"arts. 15 a 20"`, `"§ 1º do art. 44"`, `"art. 44, caput"`, `"art. 76 do ADCT"`, `"anexo I"`), modo vigente ou histórico, busca por termo dentro da norma (inclusive anexos), paginação. |
 | `estrutura_norma` | Sumário (livros, títulos, capítulos, seções e os artigos de cada um). Útil em normas grandes (RIR/2018, LC 214/2025, Código Civil). |
 | `consultar_norma` | Ficha: ementa, data, apelido, situação (revogada, convertida, sem eficácia), URN LexML, publicação no DOU, indexação do Senado, nº de normas alteradoras, regulamentos. |
 | `buscar_normas` | Busca no catálogo por ementa, apelido e indexação, sem acento ou caixa. Aceita `"frase exata"`, `OU`, `prefixo*`, filtros de tipo e ano. |
 | `historico_alteracoes` | Normas que alteraram a norma (ou um dispositivo), com as ações (alteração, acréscimo, revogação) e os dispositivos atingidos. Também o caminho inverso: o que a norma alterou. |
-| `verificar_atualizacao` | Cruza as alterações registradas pelo Senado e as normas recentes que citam a norma na ementa com os links e notas do texto do Planalto. Aponta o que pode ainda não estar refletido no compilado. |
+| `verificar_atualizacao` | Para cada norma alteradora registrada pelo Senado, procura a nota "(Redação dada/Incluído/Revogado pela …)" no próprio dispositivo alterado e confere se acréscimos existem e revogações aparecem. Também olha normas recentes cuja ementa diz alterar esta. Separa o que falta no texto, o que só aparece no cabeçalho (vigência futura) e MPs antigas. |
 | `novidades_legislativas` | Normas publicadas nos últimos N dias (relê os quadros do Planalto na hora), com filtro por tema. |
 | `mapear_tema` | Acervo completo de um tema, com relevância e motivo de cada norma; exporta `.xlsx` ou `.csv`. |
 | `listar_temas` | Temas pré-configurados (IRPJ, CSLL, PIS/COFINS, IRPF, IRRF, IPI, IOF, SIMPLES, IBS/CBS, preços de transferência, tributação internacional, previdenciárias, processo fiscal, CTN, ICMS/ISS). |
 | `status_indice` / `sincronizar_catalogo` | Estado do catálogo local e atualização em segundo plano. |
+
+Numeração: na CF, os artigos do ADCT ficam separados (`"art. 76 do ADCT"`). Em decretos que aprovam um regulamento anexo (RIR/2018, RPS, CLT), `"art. 258"` é do regulamento e `"decreto, art. 1"` é do próprio decreto. Notas de rodapé e índices depois da assinatura não viram artigos.
 
 As citações são interpretadas como um advogado escreveria: `Lei 9.430/96`, `Lei nº 12.973, de 13 de maio de 2014`, `LC 214/2025`, `Decreto 9.580/2018`, `RIR/2018`, `CTN`, `CF`, `MP 2.158-35/2001`, `DL 1.598/77`, `EC 132/2023`.
 
@@ -102,11 +104,11 @@ Os dados ficam em `~/.mcp-planalto` (catálogo SQLite, cache HTTP e planilhas ex
 
 `mapear_tema("IRPJ")` combina três camadas de evidência:
 
-1. **Núcleo**: normas estruturantes do tema (para IRPJ: DL 1.598/77, Leis 8.981/95, 9.249/95, 9.430/96, 9.532/97, 12.973/14, 14.596/23, RIR/2018 etc.). Você pode acrescentar normas com `normas_extras`.
+1. **Núcleo**: normas estruturantes do tema (para IRPJ: DL 1.598/77, Leis 8.981/95, 9.249/95, 9.430/96, 9.532/97, 12.973/14, 14.596/23, RIR/2018 etc.). Você pode acrescentar normas com `normas_extras`. Normas que tratam de vários assuntos entram com **escopo por dispositivo**, por exemplo `"Lei 9.430/1996, arts. 18 a 24-C"` para preços de transferência; só alterações nesses artigos contam para o tema.
 2. **Grafo de alterações** (Senado): toda norma que alterou, revogou ou regulamentou um dispositivo do núcleo. É isso que pega as leis de ementa genérica, do tipo "Altera a Lei nº 9.430, de 1996, e dá outras providências", que uma busca por palavra-chave perderia. Com `profundidade=2`, segue também quem alterou as principais alteradoras.
 3. **Catálogo**: normas cuja ementa, apelido ou indexação do Senado contém os termos do tema ("lucro real", "lucro presumido", "juros sobre o capital próprio"…). Você pode acrescentar termos com `termos_extras`.
 
-Cada norma recebe uma relevância (soma das evidências, usada só para ordenar), a camada e os motivos de ter entrado. A planilha traz a lista completa, com link para o texto no Planalto e uma aba de notas metodológicas.
+Cada norma recebe uma camada (núcleo, alteradora/regulamentadora, relacionada e, com `profundidade=2`, alteradora de 2º nível), uma relevância (soma das evidências, usada só para ordenar dentro da camada) e os motivos de ter entrado. Reedições de MP anteriores a 2001 são agrupadas na última edição, e MPs convertidas aparecem dentro da lei de conversão. Temas podem ser combinados (`"IRPJ/CSLL"`). A planilha traz a lista completa, com link para o texto no Planalto e uma aba de notas metodológicas.
 
 Para um tema que não está pré-configurado, passe texto livre e, de preferência, algumas normas-núcleo:
 
@@ -162,6 +164,7 @@ mcp-planalto status
 
 - **Defasagem do compilado.** O Planalto às vezes leva dias para consolidar uma alteração. Use `verificar_atualizacao`, que aponta as normas alteradoras ainda não refletidas no texto.
 - **A indexação do Senado também tem defasagem.** Normas publicadas há poucos dias podem ainda não ter vides. `verificar_atualizacao` cobre esse intervalo procurando, no catálogo, normas recentes cuja ementa cita a norma.
+- **Cobertura dos quadros do Planalto.** Leis, LCs, ECs e MPs posteriores a 1988 estão completas (conferido contra o Senado: 99,4% das leis de 1988 a 2026, 100% nos anos recentes). Os quadros do Planalto são parciais para decretos anteriores a 1991 e decretos-leis de 1937 a 1946; normas assim podem ser consultadas no Senado (ficha e histórico), mas nem sempre há texto no Planalto.
 - **Escopo.** O servidor cobre leis, LCs, decretos, decretos-leis, MPs, ECs e a Constituição. Instruções Normativas, Soluções de Consulta e demais atos da RFB não estão no Planalto. Decretos não numerados e decretos legislativos ficam de fora.
 - **HTML heterogêneo.** Páginas antigas do Planalto têm marcação irregular. O leitor foi testado em normas de várias épocas (CC/2002, CTN, DL 1.598/77, Lei 9.430/96, LC 214/2025, RIR/2018), mas uma página fora do padrão pode exigir ajuste. Nesse caso, `modo="historico"` mostra o texto bruto com as redações riscadas.
 - **Uso responsável.** O cliente HTTP limita a frequência de requisições por portal e usa cache. Não reduza esses intervalos.

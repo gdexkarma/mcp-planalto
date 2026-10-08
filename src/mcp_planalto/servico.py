@@ -140,7 +140,7 @@ _RE_TIPO_ANTES = {
     "DEC": r"\bdecretos?(?![\s-]*lei)\b",
     "DEL": r"\bdecretos?[\s-]*leis?\b",
     "MPV": r"\bmedidas?\s+provisorias?\b",
-    "EMC": r"\bemendas?\s+constitucionai?s?\b",
+    "EMC": r"\bemendas?\s+constitucion(?:al|ais)\b",
 }
 
 
@@ -551,11 +551,15 @@ class Legislacao:
             res["aviso"] = aviso
         por_norma: dict[str, list[Relacao]] = collections.defaultdict(list)
         for r in det.relacoes_recebidas:
-            if _acao_altera_texto(r) and (norma.tipo != "CF" or r.origem.startswith("EMC:")):
-                por_norma[r.origem].append(r)
-        pendentes, a_conferir, mps_antigas = [], [], []
+            if not _acao_altera_texto(r) or (norma.tipo == "CF" and not r.origem.startswith("EMC:")):
+                continue
+            if r.origem.startswith("DEC:") and norma.tipo != "DEC":
+                continue  # decreto não altera lei: o Senado registra assim remissões e tabelas
+            por_norma[r.origem].append(r)
+        pendentes, a_conferir, mps_antigas, antigas = [], [], [], []
         ultima = None
         limite_mp = (hoje() - dt.timedelta(days=180)).isoformat()
+        limite_recente = (hoje() - dt.timedelta(days=730)).isoformat()
         for chave, rels in por_norma.items():
             ref = Referencia.de_chave(chave)
             data = max((r.data for r in rels if r.data), default=None)
@@ -570,6 +574,10 @@ class Legislacao:
             provisoria = ref.tipo == "MPV" and all("provis" in normalizar(r.declaracao) for r in rels)
             if provisoria and data and data < limite_mp:
                 mps_antigas.append(item)  # caducou (texto voltou) ou foi convertida (a lei é que aparece)
+            elif (data or "") < limite_recente:
+                # alteração antiga sem nota no texto: em geral remissão registrada pelo Senado como alteração,
+                # artigo vetado, ou nota omitida pelo Planalto - não indica compilado desatualizado
+                antigas.append(item)
             elif estado == "so_no_cabecalho":
                 item["motivo"] = ("A norma só aparece em 'Vide'/notas gerais, não nos artigos alterados: "
                                   "alteração com vigência futura ou ainda não incorporada.")
@@ -583,6 +591,11 @@ class Legislacao:
         res["nao_refletidas_no_texto"] = sorted(pendentes, key=lambda p: p["data"] or "", reverse=True)
         res["a_conferir"] = sorted(a_conferir, key=lambda p: p["data"] or "", reverse=True)
         res["normas_recentes_que_citam_na_ementa"] = recentes
+        if antigas:
+            res["antigas_sem_nota"] = sorted(antigas, key=lambda p: p["data"] or "", reverse=True)
+            res["nota_antigas"] = ("Alterações com mais de 2 anos que não aparecem nas notas do texto. Costumam ser "
+                                   "remissões que o Senado registra como alteração, artigos vetados ou notas omitidas "
+                                   "pelo Planalto; confira só se o dispositivo for relevante para o caso.")
         if mps_antigas:
             res["mps_antigas_nao_citadas"] = mps_antigas
             res["nota_mps"] = ("Alterações provisórias de MPs com mais de 180 dias não indicam desatualização: "
@@ -594,8 +607,8 @@ class Legislacao:
             res["conclusao"] = ("O texto cita todas as alteradoras, mas algumas só no cabeçalho: confira se a nova "
                                 "redação já está nos dispositivos (pode ser vigência futura).")
         else:
-            res["conclusao"] = (f"O texto do Planalto reflete as {len(conhecidas) - len({_familia(i['norma']) for i in mps_antigas})}"
-                                f" normas alteradoras relevantes de {norma.nome}.")
+            res["conclusao"] = (f"O texto do Planalto reflete as alterações recentes conhecidas de {norma.nome} "
+                                f"({len(conhecidas)} normas alteradoras no total).")
         res["observacao"] = ("Checagem automática: cada norma alteradora (Senado) é procurada nas notas e links do "
                              "próprio dispositivo alterado; acréscimos e revogações também são conferidos pela "
                              "existência do dispositivo. O Senado às vezes registra como alteração simples remissões; "
