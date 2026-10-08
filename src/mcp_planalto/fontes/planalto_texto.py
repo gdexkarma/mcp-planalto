@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from urllib.parse import urljoin
 
 from lxml import html as lhtml
 
@@ -111,6 +112,9 @@ class Bloco:
     vigente: str  # texto sem trechos riscados
     completo: str  # texto com trechos riscados entre ~~ ~~
     ancoras: list[str] = field(default_factory=list)
+    # links não riscados: (texto do link, href, texto que vem antes dele no bloco). Servem para resolver
+    # notas como "(Vide Lei X) Produção de efeitos", cujo link aponta o artigo de vigência da outra norma.
+    links: list[tuple[str, str, str]] = field(default_factory=list)
     tipo: str = "texto"  # dispositivo, estrutura, texto, preambulo, citacao, assinatura, rodape
     chave: tuple = ()
     rotulo: str = ""
@@ -158,6 +162,14 @@ class Documento:
     blocos: list[Bloco]
     last_modified: str | None = None
     arquivos_citados: set[str] = field(default_factory=set)  # nomes de arquivo dos links (l12973.htm...)
+    links_gerais: list[tuple[str, str, str]] = field(default_factory=list)  # links do cabeçalho (ver Bloco.links)
+
+    def bloco_da_ancora(self, nome: str) -> int | None:
+        nome = nome.lower()
+        for i, b in enumerate(self.blocos):
+            if any(a.lower() == nome for a in b.ancoras):
+                return i
+        return None
 
     # ----------------------------------------------------------- seleção
     def artigos(self, espaco: str | None = None) -> list[str]:
@@ -384,6 +396,7 @@ def _dividir_especificacao(espec: str) -> list[str]:
 # ======================================================================= parser
 
 _BR = object()  # marcador de quebra de linha dentro de um parágrafo
+_LINK = object()  # marcador de fim de link: (_LINK, href, texto do link, riscado)
 
 
 class _Coletor:
@@ -408,21 +421,33 @@ class _Coletor:
                 grupos[-1].append(s)
         juntos: list[list] = []
         for g in grupos:
-            cru = _espacos("".join(x[0] for x in g if x[0] != "#"))
+            cru = _espacos("".join(x[0] for x in g if x[0] != "#" and x[0] is not _LINK))
             if juntos and not (_inicio_dispositivo(cru) or _RE_ESTRUTURA.match(cru)):
                 juntos[-1] += [(" ", False)] + g
             else:
                 juntos.append(g)
         for g in juntos:
             ancoras = [x[1] for x in g if x[0] == "#"]
-            segs = [x for x in g if x[0] != "#"]
+            links, corrido = [], ""
+            for x in g:
+                if x[0] is _LINK:
+                    _m, href, texto_link, risc = x
+                    texto_link = _espacos(texto_link)
+                    if not risc and texto_link and href:
+                        antes = _espacos(corrido)
+                        if antes.endswith(texto_link):
+                            antes = antes[: -len(texto_link)]
+                        links.append((texto_link, href, antes[-160:].strip()))
+                elif x[0] != "#" and not x[1]:
+                    corrido += x[0]
+            segs = [x for x in g if x[0] != "#" and x[0] is not _LINK]
             vig = _espacos("".join(s for s, r in segs if not r))
             partes = []
             for s, r in segs:
                 partes.append(f"~~{s.strip()}~~ " if r and s.strip() else s)
             comp = _espacos(re.sub(r"~~\s*~~", " ", "".join(partes)))
             if comp:
-                self.blocos.append(Bloco(vigente=vig, completo=comp, ancoras=ancoras))
+                self.blocos.append(Bloco(vigente=vig, completo=comp, ancoras=ancoras, links=links))
         self.segmentos = []
 
     def percorrer(self, el, riscado: bool = False) -> None:
@@ -462,6 +487,8 @@ class _Coletor:
         self.texto(el.text, r)
         for filho in el:
             self.percorrer(filho, r)
+        if tag == "a" and el.get("href"):
+            self.segmentos.append((_LINK, el.get("href"), el.text_content() or "", r))
         if bloco:
             self.descarregar()
         self.texto(el.tail, riscado)
@@ -530,6 +557,7 @@ def _juntar_fragmentos(blocos: list[Bloco]) -> list[Bloco]:
                 ant.vigente = _espacos(f"{ant.vigente} {b.vigente}")
                 ant.completo = _espacos(f"{ant.completo} {b.completo}")
                 ant.ancoras += b.ancoras
+                ant.links += b.links
                 continue
         out.append(b)
     return out
@@ -833,8 +861,22 @@ def ler_documento(conteudo: str, url: str, last_modified: str | None = None) -> 
         h = (a.get("href") or "").split("#")[0].strip().lower()
         if h:
             arquivos.add(h.rsplit("/", 1)[-1])
+
+    def absolutos(links):
+        out = []
+        for t, h, c in links:
+            try:
+                out.append((t, urljoin(url, h.strip()), c))
+            except ValueError:
+                continue
+        return out
+
+    for b in brutos:
+        b.links = absolutos(b.links)
+    links_gerais = [lk for b in brutos[:inicio] for lk in b.links]
     return Documento(url=url, epigrafe=epigrafe, ementa=ementa, notas_gerais=notas_gerais,
-                     blocos=blocos, last_modified=last_modified, arquivos_citados=arquivos)
+                     blocos=blocos, last_modified=last_modified, arquivos_citados=arquivos,
+                     links_gerais=links_gerais)
 
 
 def citacoes_de_normas(texto: str) -> set[str]:

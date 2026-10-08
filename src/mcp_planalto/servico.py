@@ -34,6 +34,7 @@ from .referencias import (
     normalizar,
     rotulo_dispositivo,
 )
+from .efeitos import data_de_publicacao, data_efeitos
 from .temas import Tema, escopo_de, localizar_temas
 
 log = logging.getLogger(__name__)
@@ -294,6 +295,104 @@ _SINONIMOS_SIGLA = {
 }
 
 
+def _data_br(iso: str | None) -> str:
+    if not iso:
+        return "data não identificada"
+    a, m, d = iso.split("-")
+    return f"{d}/{m}/{a}"
+
+
+def _espacos_txt(t: str) -> str:
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _nome_da_epigrafe(epigrafe: str | None) -> str | None:
+    try:
+        return interpretar(epigrafe or "").nome
+    except ValueError:
+        return None
+
+
+def _trecho_da_ancora(doc: Documento, i: int) -> list:
+    """Bloco da âncora e seus filhos (alíneas de um inciso, incisos de um caput)."""
+    base = doc.blocos[i]
+    out = [base]
+    for b in doc.blocos[i + 1:i + 60]:
+        if b.obsoleto:
+            continue
+        if base.chave and len(b.chave) > len(base.chave) and b.chave[:len(base.chave)] == base.chave:
+            out.append(b)
+        elif not b.chave and b.tipo == "texto" and b.artigo == base.artigo and len(out) < 3:
+            out.append(b)
+        else:
+            break
+    return out
+
+
+def _artigos_citados(texto: str, alvo: Documento) -> list[str]:
+    """Artigos da própria norma de destino citados na cláusula ("em relação aos arts. 450, 461 e 542")."""
+    out = []
+    for m in re.finditer(r"\barts?\.\s*((?:\d+[º°o]?(?:-[A-Za-z])?)(?:(?:\s*,\s*|\s+e\s+|\s+a\s+)"
+                         r"(?:\d+[º°o]?(?:-[A-Za-z])?))*)(?!\s*(?:,\s*)?d[aoe]s?\s+(?:Lei|Decreto|Medida|Emenda|Constitui))",
+                         texto):
+        esc = escopo_de("arts. " + m.group(1))
+        if esc:
+            out += [a for a in alvo.artigos("") if esc(a) and a not in out]
+    return out[:60]
+
+
+def _revogacoes_diferidas(alvo: Documento, arts: list[str], ref: Referencia, artigos_lidos: set | None,
+                          pub: dt.date | None, data_padrao: dt.date | None) -> list[dict]:
+    """Nos artigos `arts` de `alvo` que revogam ("Ficam revogados…"), os trechos que atingem `ref`
+    (e, se dado, um dos `artigos_lidos`)."""
+    out = []
+    for a in arts:
+        bl = [b for b in alvo.blocos if b.artigo == a and b.espaco == "" and not b.obsoleto and b.tipo != "citacao"]
+        if not bl or not re.search(r"revogad", normalizar(bl[0].vigente)):
+            continue
+        data = data_efeitos(bl[0].vigente, pub) or data_padrao
+        for i, b in enumerate(bl):
+            if not b.chave or not cita_norma(b.vigente, ref):
+                continue
+            grupo = [b] + [c for c in bl[i + 1:i + 40]
+                           if len(c.chave) > len(b.chave) and c.chave[:len(b.chave)] == b.chave]
+            texto = _espacos_txt(" ".join(c.vigente for c in grupo))
+            if artigos_lidos is not None:
+                esc = _escopo_revogado(texto, ref)
+                if esc is not None and not any(esc(x) for x in artigos_lidos):
+                    continue
+            out.append({"tipo": "revogacao_futura", "data": data.isoformat() if data else None,
+                        "dispositivo_revogador": f"art. {a}, " + rotulo_dispositivo(b.chave).split(", ", 1)[-1],
+                        "trecho": texto[:700]})
+    return out
+
+
+def _escopo_revogado(texto: str, ref: Referencia) -> Callable[[str], bool] | None:
+    """Artigos de `ref` atingidos no trecho de revogação; None = a norma inteira (ou não deu para saber)."""
+    filtros = []
+    for m in re.finditer(r"\barts?\.\s*((?:\d+[º°o]?(?:-[A-Za-z])?)(?:(?:\s*,\s*|\s+e\s+|\s+a\s+)"
+                         r"(?:\d+[º°o]?(?:-[A-Za-z])?))*)", texto):
+        if esc := escopo_de("arts. " + m.group(1)):
+            filtros.append(esc)
+    if not filtros:
+        return None
+    return lambda art: any(f(art) for f in filtros)
+
+
+def _redacao_anterior(doc: Documento, b) -> str | None:
+    """Redação riscada imediatamente anterior do mesmo dispositivo (a que ainda vale até a data de efeitos)."""
+    try:
+        i = doc.blocos.index(b)
+    except ValueError:
+        return None
+    for x in reversed(doc.blocos[max(0, i - 6):i]):
+        if x.chave == b.chave and "~~" in x.completo:
+            return _espacos_txt(x.completo.replace("~~", ""))
+    if "~~" in b.completo:  # trecho riscado dentro do próprio bloco
+        return _espacos_txt(" ".join(re.findall(r"~~(.*?)~~", b.completo)))
+    return None
+
+
 def _familia(chave: str) -> str:
     """MPs reeditadas (pré-2001) contam como uma só: "MPV:1537-41:1997" -> "MPV:1537"."""
     if chave.startswith("MPV:") and re.match(r"MPV:\d+-\d+:", chave):
@@ -475,6 +574,21 @@ class Legislacao:
         return self.obter_detalhe(norma, max_idade)[0]
 
     # ================================================================ texto
+    def _doc_por_url(self, url: str) -> Documento:
+        """Documento de outra página do Planalto (destino de link), com o mesmo cache de documentos."""
+        url = url.split("#")[0]
+        max_idade = self.config.cache_horas * 3600
+        with self._lock:
+            if url in self._docs and time.time() - self._docs[url][0] < max_idade:
+                return self._docs[url][1]
+        r = self.http.get(url, max_idade=max_idade)
+        doc = ler_documento(r.texto(), r.url, r.last_modified)
+        with self._lock:
+            self._docs[url] = (time.time(), doc)
+            while len(self._docs) > 12:
+                self._docs.popitem(last=False)
+        return doc
+
     def documento(self, norma: Norma, forcar: bool = False) -> Documento:
         if not norma.url_planalto:
             raise NormaNaoEncontrada(
@@ -562,11 +676,31 @@ class Legislacao:
             if vig:
                 cab["notas_de_vigencia_da_norma"] = vig[:12]
         if dispositivo and blocos:
+            alertas = []
+            try:
+                futuros = self._efeitos_futuros(norma, doc, blocos)
+            except Exception as e:  # complemento: a leitura não pode falhar por causa dele
+                log.warning("Falha ao conferir notas de vigência de %s: %s", norma.nome, e)
+                futuros = []
+            if futuros:
+                cab["efeitos_futuros"] = futuros
+                for f in futuros:
+                    if f["tipo"] == "revogacao_futura":
+                        alertas.append(f"{f['norma']} ({f['dispositivo_revogador']}) revoga este dispositivo "
+                                       f"a partir de {_data_br(f['data'])}: \"{f['trecho'][:300]}\"")
+                    else:
+                        alertas.append(f"a redação do {f['dispositivo'] or 'dispositivo'} dada por norma cuja "
+                                       f"cláusula de vigência ({f['norma']}) só produz efeitos a partir de "
+                                       f"{_data_br(f['data'])}; até lá vale a redação anterior"
+                                       + (" (em 'redacao_ainda_aplicavel')" if f.get("redacao_ainda_aplicavel")
+                                          else " (use modo='historico')"))
             pend = self._alteracoes_nao_refletidas(norma, dispositivo, blocos)
             if pend:
-                cab["alerta"] = ("O Senado registra alterações recentes deste dispositivo que não aparecem nas notas "
-                                 "do texto do Planalto (vigência futura ou compilado desatualizado): "
-                                 + "; ".join(pend) + ". Confira no DOU ou com verificar_atualizacao.")
+                alertas.append("o Senado registra alterações recentes deste dispositivo que não aparecem nas notas "
+                               "do texto do Planalto (vigência futura ou compilado desatualizado): " + "; ".join(pend)
+                               + ". Confira no DOU ou com verificar_atualizacao")
+            if alertas:
+                cab["alerta"] = " | ".join(a[0].upper() + a[1:] for a in alertas) + "."
         corpo = doc.renderizar(blocos, modo=modo, notas=notas, omitir_revogados=omitir_revogados)
         if not corpo:
             cab["aviso"] = ("O trecho pedido só existe em redação anterior (está riscado no Planalto). "
@@ -579,6 +713,91 @@ class Legislacao:
         if modo == "historico":
             cab["legenda"] = "Trechos entre ~~ ~~ são redações anteriores (riscadas no Planalto)."
         return cab
+
+    def _efeitos_futuros(self, norma: Norma, doc: Documento, blocos: list | None,
+                         prazo: float = 15.0) -> list[dict]:
+        """Notas "(Produção de efeitos)", "(Vigência)" e "(Vide …)" cujo link aponta para uma cláusula com data
+        futura, e revogações com data futura ("Ficam revogados a partir de 1º de janeiro de 2027: ... da Lei
+        X: arts. 1º a 16").
+
+        blocos: dispositivo lido (considera também o caput do artigo e as notas do cabeçalho);
+        None = a norma inteira (para verificar_atualizacao)."""
+        inicio, hoje_ = time.time(), hoje()
+        if blocos is None:
+            fontes = [(b, lk) for b in doc.blocos if not b.obsoleto for lk in b.links]
+            artigos_lidos = None
+        else:
+            proprios = list(blocos)
+            arts = {(b.espaco, b.artigo) for b in blocos if b.artigo}
+            for b in doc.blocos:  # notas do caput valem para os incisos e parágrafos lidos
+                if (b.espaco, b.artigo) in arts and len(b.chave) == 1 and b not in proprios:
+                    proprios.append(b)
+            fontes = [(b, lk) for b in proprios for lk in b.links]
+            artigos_lidos = {a for _e, a in arts}
+        fontes += [(None, lk) for lk in doc.links_gerais]
+        resolvidos: dict[tuple[str, str], tuple | None] = {}
+        revs_feitas: set[tuple[str, str]] = set()
+        out, docs_externos = [], set()
+        for b, (texto, href, contexto) in fontes:
+            if time.time() - inicio > prazo:
+                break
+            t = normalizar(texto)
+            if "encerrad" in t or "revogad" in t:
+                continue
+            efeito = bool(re.search(r"produc.o de efeito|vigencia", t))
+            if not (efeito or t.startswith("(vide")):
+                continue
+            url, _, frag = href.partition("#")
+            if not frag:
+                continue
+            k = (url.lower(), frag.lower())
+            if k not in resolvidos:
+                resolvidos[k] = None
+                mesmo = url.lower() == doc.url.split("#")[0].lower()
+                if not mesmo and url.lower() not in docs_externos and len(docs_externos) >= 6:
+                    continue
+                try:
+                    alvo = doc if mesmo else self._doc_por_url(url)
+                except Exception as e:  # link quebrado ou portal fora: a leitura segue sem a nota
+                    log.info("Destino de nota de vigência indisponível (%s): %s", href, e)
+                    continue
+                if not mesmo:
+                    docs_externos.add(url.lower())
+                i = alvo.bloco_da_ancora(frag)
+                if i is None:
+                    continue
+                trecho_bl = _trecho_da_ancora(alvo, i)
+                trecho = _espacos_txt(" ".join(x.vigente for x in trecho_bl))[:1200]
+                pub = data_de_publicacao(alvo.epigrafe)
+                resolvidos[k] = (alvo, trecho_bl, trecho, pub,
+                                 _nome_da_epigrafe(alvo.epigrafe) or url.rsplit("/", 1)[-1])
+            if resolvidos[k] is None:
+                continue
+            alvo, trecho_bl, trecho, pub, nome_alvo = resolvidos[k]
+            if k not in revs_feitas:
+                revs_feitas.add(k)
+                # 1) o destino é (ou cita) artigo de revogações com data
+                arts_alvo = [x.artigo for x in trecho_bl[:1] if x.artigo and len(x.chave) == 1] or \
+                    _artigos_citados(trecho, alvo)
+                for rev in _revogacoes_diferidas(alvo, arts_alvo, norma.ref, artigos_lidos, pub,
+                                                 data_efeitos(trecho, pub)):
+                    if rev["data"] and rev["data"] > hoje_.isoformat():
+                        rev["norma"] = nome_alvo
+                        if rev not in out:
+                            out.append(rev)
+            # 2) a própria redação lida só produz efeitos no futuro
+            if efeito and b is not None:
+                d = data_efeitos(trecho, pub)
+                if d and d > hoje_:
+                    item = {"tipo": "efeitos_futuros", "norma": nome_alvo, "data": d.isoformat(),
+                            "clausula": trecho[:600], "dispositivo": rotulo_dispositivo(b.chave) if b.chave else None}
+                    anterior = _redacao_anterior(doc, b)
+                    if anterior:
+                        item["redacao_ainda_aplicavel"] = anterior[:1500]
+                    if not any(o.get("clausula") == item["clausula"] and o.get("dispositivo") == item["dispositivo"]
+                               for o in out):
+                        out.append(item)
+        return out
 
     def _alteracoes_nao_refletidas(self, norma: Norma, dispositivo: str, blocos: list) -> list[str]:
         """Alterações dos últimos 2 anos registradas pelo Senado para o dispositivo e não citadas nos blocos."""
@@ -818,6 +1037,16 @@ class Legislacao:
                 a_conferir.append(item)
             else:
                 pendentes.append(item)
+        try:
+            futuros = self._efeitos_futuros(norma, doc, None, prazo=25.0)
+        except Exception as e:
+            log.warning("Falha ao conferir efeitos futuros de %s: %s", norma.nome, e)
+            futuros = []
+        if futuros:
+            res["efeitos_e_revogacoes_futuras"] = futuros[:30]
+            res["nota_efeitos_futuros"] = (
+                "O texto do Planalto já mostra essas redações (ou ainda mostra os dispositivos revogados), mas elas "
+                "só valem a partir da data indicada: até lá aplica-se a redação anterior / o dispositivo segue em vigor.")
         conhecidas = {_familia(c) for c in por_norma}
         recentes, recentes_cabecalho = self._recentes_que_alteram(norma, doc, texto_doc,
                                                                  {r.origem for r in det.relacoes_recebidas})
@@ -842,6 +1071,9 @@ class Legislacao:
         if pendentes or recentes:
             res["conclusao"] = ("ATENÇÃO: há normas que alteram esta e não aparecem no texto do Planalto. O compilado "
                                 "pode estar desatualizado nesses pontos; confira as normas listadas no DOU.")
+        elif futuros and not a_conferir:
+            res["conclusao"] = ("O texto reflete as alterações conhecidas, mas há redações ou revogações com efeitos "
+                                "FUTUROS (veja 'efeitos_e_revogacoes_futuras'): confira a data antes de aplicar.")
         elif a_conferir:
             res["conclusao"] = ("A CONFERIR: há alterações que o texto só menciona em 'Vide' ou em parte dos "
                                 "dispositivos alterados (em geral vigência futura). Veja 'a_conferir' e confirme "
