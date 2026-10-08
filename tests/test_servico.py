@@ -63,7 +63,10 @@ def test_busca_sem_acento(L):
 
 
 def test_consulta_fts_segura():
-    assert consulta_fts('lucro "real" OU IRPJ/CSLL') == '("lucro" AND "real") OR (("irpj" OR "csll"))'
+    assert consulta_fts('lucro "real" OU SUDENE/SUDAM') == '(("lucro" OR "lucros") AND "real") OR (("sudene" OR "sudam"))'
+    assert '"retido na fonte"' in consulta_fts("IRRF remessas") and '"remess"*' in consulta_fts("IRRF remessas")
+    assert consulta_fts("PIS-Importação") == '(("pis" AND "importac"*))'
+    assert consulta_fts("Créditos Presumidos") == consulta_fts("créditos presumidos")
     assert consulta_fts("transação tributária") == '("transac"* AND "tributari"*)'
     assert consulta_fts("tribut*") == '("tribut"*)'
     assert consulta_fts('"') == ""

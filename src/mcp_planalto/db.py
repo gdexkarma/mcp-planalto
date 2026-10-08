@@ -144,6 +144,61 @@ def radical_flexao(p: str) -> str | None:
     return None
 
 
+# Siglas que quase nunca aparecem por extenso na ementa/indexação: cada uma vale também pelas formas longas
+# (cada alternativa é uma lista de frases combinadas com E).
+SINONIMOS: dict[str, list[list[str]]] = {
+    "irrf": [["retido na fonte"], ["imposto de renda na fonte"], ["incidente na fonte"], ["retencao na fonte", "imposto"]],
+    "irpj": [["imposto de renda", "pessoa juridica"], ["imposto sobre a renda", "pessoa juridica"],
+             ["imposto de renda", "pessoas juridicas"], ["imposto sobre a renda das pessoas juridicas"]],
+    "irpf": [["imposto de renda", "pessoa fisica"], ["imposto sobre a renda", "pessoa fisica"],
+             ["imposto de renda", "pessoas fisicas"]],
+    "csll": [["contribuicao social sobre o lucro"]],
+    "iof": [["imposto sobre operacoes financeiras"], ["imposto sobre operacoes de credito"]],
+    "ipi": [["imposto sobre produtos industrializados"]],
+    "cprb": [["contribuicao previdenciaria sobre a receita bruta"]],
+    "jcp": [["juros sobre capital proprio"], ["juros sobre o capital proprio"]],
+    "carf": [["conselho administrativo de recursos fiscais"]],
+    "csrf": [["camara superior de recursos fiscais"]],
+    "ibs": [["imposto sobre bens e servicos"]],
+    "cbs": [["contribuicao social sobre bens e servicos"]],
+    "itr": [["imposto sobre a propriedade territorial rural"]],
+    "iss": [["imposto sobre servicos"]],
+}
+
+
+def _palavra_fts(tok: str, p: str, prefixo: bool) -> str:
+    """Uma palavra: sigla expandida, flexão de gênero/número por radical, plural curto."""
+    if not prefixo and p in SINONIMOS:
+        alts = [f'"{p}"'] + ["(" + " AND ".join(f'"{f}"' for f in alt) + ")" for alt in SINONIMOS[p]]
+        return "(" + " OR ".join(alts) + ")"
+    sigla_ou_numero = tok.isupper() or any(c.isdigit() for c in tok)
+    if not prefixo and not sigla_ou_numero and (radical := radical_flexao(p)):
+        return f'"{radical}"*'  # "tributária" casa "tributário"; "Créditos" casa "credito"
+    if not prefixo and not sigla_ou_numero and 5 <= len(p) < 7 and p.isalpha() and not p.endswith("s"):
+        return f'("{p}" OR "{p}s")'  # "trust" / "trusts"
+    return f'"{p}"' + ("*" if prefixo else "")
+
+
+def _termo_fts(tok: str) -> str | None:
+    """Token sem aspas: "IRPJ/CSLL" = um ou outro; "PIS-Importação" = as duas palavras."""
+    prefixo = tok.endswith("*")
+    pedacos = []
+    for parte in re.split(r"-", tok.rstrip("*")):
+        alts = [a for a in re.findall(r"\w+", normalizar(parte)) if len(a) > 1 or a.isdigit()]
+        bruto = re.findall(r"\w+", parte)
+        if not alts:
+            continue
+        if "/" in parte and len(alts) > 1:
+            pedacos.append("(" + " OR ".join(_palavra_fts(b, a, prefixo) for b, a in zip(bruto, alts)) + ")")
+        elif len(alts) > 1:  # "9.430", "art.74": frase
+            pedacos.append('"' + " ".join(alts) + '"')
+        else:
+            pedacos += [_palavra_fts(b, a, prefixo) for b, a in zip(bruto, alts)]
+    if not pedacos:
+        return None
+    return pedacos[0] if len(pedacos) == 1 else "(" + " AND ".join(pedacos) + ")"
+
+
 def consulta_fts(texto: str) -> str:
     """Converte texto livre em expressão FTS5 segura.
 
@@ -168,22 +223,9 @@ def consulta_fts(texto: str) -> str:
             continue
         if tok.upper() in ("AND", "E", "NOT", "NEAR"):
             continue
-        prefixo = tok.endswith("*")
-        if re.fullmatch(r"\w+(?:/\w+)+\*?", tok):  # "IRPJ/CSLL", "SUDENE/SUDAM" -> alternativas
-            alts = [p for p in re.findall(r"\w+", normalizar(tok)) if len(p) > 1 or p.isdigit()]
-            if alts:
-                grupos[-1].append("(" + " OR ".join(f'"{a}"' for a in alts) + ")")
-            continue
-        palavras = [p for p in re.findall(r"[\w]+", normalizar(tok)) if len(p) > 1 or p.isdigit()]
-        if not palavras:
-            continue
-        if len(palavras) == 1:
-            p = palavras[0]
-            if not prefixo and tok.lower() == tok and (radical := radical_flexao(p)):
-                p, prefixo = radical, True  # "tributária" casa "tributário"; "transação", "transações"
-            grupos[-1].append(f'"{p}"' + ("*" if prefixo else ""))
-        else:  # "lucro-real" -> frase
-            grupos[-1].append('"' + " ".join(palavras) + '"')
+        termo = _termo_fts(tok)
+        if termo:
+            grupos[-1].append(termo)
     partes = ["(" + " AND ".join(g) + ")" for g in grupos if g]
     return " OR ".join(partes)
 
