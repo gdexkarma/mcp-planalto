@@ -188,6 +188,16 @@ mcp-planalto status
 
 ---
 
+## Skill para o Claude
+
+A pasta `skill/legislacao-planalto-mcp/` traz uma skill que ensina o Claude a usar o servidor do jeito
+certo: ler o dispositivo (não a lei inteira), repassar os alertas de vigência futura e revogação, rodar
+`verificar_atualizacao` antes de afirmar que um texto está atualizado, não tratar busca vazia como
+inexistência e informar as leis-base em temas livres. Para instalar no claude.ai, envie o arquivo
+`.skill` gerado a partir dessa pasta (ou copie a pasta para `~/.claude/skills/` no Claude Code).
+
+---
+
 ## Limites conhecidos
 
 - **Defasagem do compilado.** O Planalto às vezes leva dias para consolidar uma alteração. Use `verificar_atualizacao`, que aponta as normas alteradoras ainda não refletidas no texto.
