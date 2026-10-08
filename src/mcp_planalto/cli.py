@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sqlite3
 import sys
 
 
@@ -24,6 +25,7 @@ def main(argv: list[str] | None = None) -> None:
     sub = p.add_subparsers(dest="cmd")
 
     s = sub.add_parser("servir", help="inicia o servidor MCP (padrão)")
+    s.add_argument("-v", "--verboso", action="store_true", dest="verboso_servir", help="log detalhado")
     s.add_argument("--http", action="store_true", help="usa streamable-http em vez de stdio")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--porta", type=int, default=8000)
@@ -89,10 +91,11 @@ def main(argv: list[str] | None = None) -> None:
     if a.cmd in (None, "servir"):
         from .server import main as servir
 
+        verboso = a.verboso or getattr(a, "verboso_servir", False)
         if a.cmd == "servir" and a.http:
-            servir("http", a.host, a.porta, a.verboso)
+            servir("http", a.host, a.porta, verboso)
         else:
-            servir(verboso=a.verboso)
+            servir(verboso=verboso)
         return
 
     logging.basicConfig(level=logging.INFO if a.verboso else logging.WARNING,
@@ -100,9 +103,9 @@ def main(argv: list[str] | None = None) -> None:
     from .http import ErroHTTP
     from .servico import Legislacao, NormaNaoEncontrada
 
-    L = Legislacao()
     progresso = lambda m: print(m, file=sys.stderr)  # noqa: E731
     try:
+        L = Legislacao()
         if a.cmd == "sincronizar":
             if not a.so_detalhes:
                 _imprimir(L.sincronizar_catalogo(a.tipos, a.desde_ano, senado=a.senado, progresso=progresso))
@@ -152,6 +155,9 @@ def main(argv: list[str] | None = None) -> None:
             _imprimir(L.status())
     except ErroHTTP as e:
         print(f"Erro: portal indisponível ({e}). Tente novamente em alguns minutos.", file=sys.stderr)
+        sys.exit(2)
+    except sqlite3.Error as e:
+        print(f"Erro no banco local: {e}. Outro processo pode estar usando-o; tente de novo.", file=sys.stderr)
         sys.exit(2)
     except OSError as e:
         print(f"Erro de arquivo/sistema: {e}. Confira MCP_PLANALTO_HOME.", file=sys.stderr)

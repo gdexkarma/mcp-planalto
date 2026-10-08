@@ -298,7 +298,8 @@ class IndicesPlanalto:
         return ler_quadro(r.texto(), tipo, r.url, ano_ini, ano_fim)
 
     def entradas(self, tipo: str, ano_inicio: int | None = None, ano_fim: int | None = None,
-                 max_idade: float | None = 0) -> list[EntradaIndice]:
+                 max_idade: float | None = 0, falhas: list[str] | None = None) -> list[EntradaIndice]:
+        """`falhas`, se informada, recebe as URLs dos quadros que não puderam ser lidos."""
         out: list[EntradaIndice] = []
         for rot, url, a0, a1 in self.quadros(tipo):
             if ano_inicio and a1 and a1 < ano_inicio:
@@ -309,6 +310,8 @@ class IndicesPlanalto:
                 out.extend(self.ler(url, tipo, max_idade=max_idade, ano_ini=a0, ano_fim=a1))
             except ErroHTTP as e:
                 log.warning("Quadro indisponível (%s): %s", rot, e)
+                if falhas is not None:
+                    falhas.append(url)
         if ano_inicio or ano_fim:
             out = [e for e in out if e.ano is None or
                    ((not ano_inicio or e.ano >= ano_inicio) and (not ano_fim or e.ano <= ano_fim))]

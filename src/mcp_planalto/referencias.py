@@ -39,7 +39,7 @@ _PADROES_TIPO: list[tuple[str, str]] = [
     (r"medida\s+provisoria|\bmpv?\b|\bm\.\s?p\.?", "MPV"),
     (r"decreto[\s-]*lei|\bdec\.?\s*-?\s*lei|\bdl\b|\bdel\b|\bd\.\s?l\.?", "DEL"),
     (r"decreto(\s+federal)?|\bdecr?\b\.?|\bd\.", "DEC"),
-    (r"\blei(\s+federal|\s+ordinaria)?\b|\bl\.", "LEI"),
+    (r"\blei(\s+federal|\s+ordinaria)?\b|\bl\.|\bl(?=\s?\d{3,})", "LEI"),
 ]
 _RE_CF = re.compile(r"constituicao(\s+(federal|da republica)[\w\s]*)?|\bcf\b|\bcrfb\b")
 # Atos que não são normas federais tratadas aqui. Recusados quando aparecem ANTES da norma encontrada
@@ -350,6 +350,8 @@ def romano_para_int(s: str) -> int | None:
 
 
 def int_para_romano(n: int) -> str:
+    if n <= 0 or n > 3999:
+        return str(n)  # fora do alcance dos romanos (e evita laço gigante com entrada maliciosa)
     vals = [(1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"), (90, "XC"),
             (50, "L"), (40, "XL"), (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I")]
     out = ""
@@ -392,14 +394,14 @@ def chave_dispositivo(texto: str) -> tuple:
         ja_inc = any(k in ("inc", "par") for k, _ in partes)
         if re.fullmatch(r"(?:paragrafo|par\.?|§)\s*unico", tok):
             partes.append(("par", "unico"))
-        elif mm := re.fullmatch(r"(?:§+|paragrafo)\s*(\d+)(?:\s*-\s*([a-z])|([a-z]))?", tok):
+        elif mm := re.fullmatch(r"(?:§+|paragrafo|par\.?)\s*(\d{1,4})(?:\s*-\s*([a-z])|([a-z]))?", tok):
             partes.append(("par", mm.group(1) + (mm.group(2) or mm.group(3) or "")))
         elif (mm := re.fullmatch(r"(?:alinea\s+)?[\"'“”]?([a-z]{1,2})[\"'“”]?\)?", tok)) and \
                 (tok.startswith("alinea") or (ja_inc and any(k == "inc" for k, _ in partes)) or
                  not re.fullmatch(r"[ivxlc]+", mm.group(1)) or mm.group(1) in ("c", "l")):
             # letra depois de inciso é alínea ("art. 1, I, c"), mesmo que pareça romano
             partes.append(("ali", mm.group(1)))
-        elif mm := re.fullmatch(r"(?:inciso\s+|inc\.?\s*)?(\d+|[ivxlc]+)(?:\s*-\s*([a-z]))?", tok):
+        elif mm := re.fullmatch(r"(?:inciso\s+|inc\.?\s*)?(\d{1,4}|[ivxlc]+)(?:\s*-\s*([a-z]))?", tok):
             if any(k in ("inc", "ali") for k, _ in partes) and not re.match(r"inc", tok):
                 partes.append(("item", mm.group(1)))  # depois de inciso/alínea, número solto é item
                 continue

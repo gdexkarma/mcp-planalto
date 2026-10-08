@@ -139,9 +139,16 @@ class ClienteHTTP:
             meta = json.dumps({"url": r.url, "status": r.status, "cabecalhos": r.cabecalhos,
                                "obtido_em": r.obtido_em, "sha256": hashlib.sha256(r.corpo).hexdigest()}).encode()
             fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")
-            with os.fdopen(fd, "wb") as f:
-                f.write(self.MAGICO + len(meta).to_bytes(4, "big") + meta + gzip.compress(r.corpo, 6))
-            os.replace(tmp, p)
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(self.MAGICO + len(meta).to_bytes(4, "big") + meta + gzip.compress(r.corpo, 6))
+                os.replace(tmp, p)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
         except OSError as e:  # disco cheio etc.: o download continua valendo
             log.warning("Não foi possível gravar o cache de %s: %s", pedido_url, e)
 

@@ -357,6 +357,7 @@ def _ordem(art: str) -> tuple[int, str]:
 def _dividir_especificacao(espec: str) -> list[str]:
     """Separa pedidos múltiplos e reordena "§ 1º do art. 44" -> "art. 44, § 1º"."""
     saida = []
+    espec = re.sub(r"\s+", " ", espec[:2000])
     for parte in espec.split(";"):
         parte = parte.strip()
         if not parte:
@@ -501,7 +502,10 @@ _ASPAS_ABRE = ("“", '"', "‘", "'", "«", "”")
 def _fecha_citacao(t: str) -> bool:
     if re.search(r"\((NR|AC)\)\s*[.;]?\s*(\(.*\))?\s*$", t):
         return True
-    fim = re.sub(r"(\s*\([^()]*\))+\s*$", "", t).rstrip(" .;")  # ignora notas finais
+    fim = t.rstrip()
+    while fim.endswith(")") and "(" in fim:  # ignora notas finais "(Redação dada...)" (linear)
+        fim = fim[:fim.rfind("(")].rstrip()
+    fim = fim.rstrip(" .;")
     if fim.endswith(("”", "»", "’")):
         return True
     if fim.endswith('"'):

@@ -1,7 +1,5 @@
 """Servidor MCP: ferramentas de pesquisa e leitura da legislação federal."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import threading
@@ -43,7 +41,7 @@ Fluxo recomendado:
 Cite sempre a norma e o dispositivo. O texto do Planalto não substitui o publicado no DOU.
 """
 
-_instancia: Legislacao | None = None
+_instancia: "Legislacao | None" = None
 _lock = threading.Lock()
 _sync_ativa = threading.Event()
 
@@ -117,12 +115,13 @@ def _ferramenta(**kw):
 @_ferramenta(annotations=LEITURA, structured_output=False)
 async def ler_norma(
     referencia: Referencia,
-    dispositivo: Annotated[str | None, Field(description=(
+    dispositivo: Annotated[str | None, Field(max_length=300, description=(
         'Trecho a ler: "art. 74", "arts. 15 a 20", "arts. 74 e 80", "art. 2º, § 4º, III", "§ 1º do art. 44", '
         '"art. 44, caput", "art. 10-A", "art. 76 do ADCT", "anexo I". Em decretos que aprovam regulamento '
         '(RIR, RPS, CLT) "art. N" é do regulamento e "decreto, art. N" do decreto. Vários separados por ";".'
     ))] = None,
-    termo: Annotated[str | None, Field(description="Devolve só os artigos/anexos que contêm estas palavras.")] = None,
+    termo: Annotated[str | None, Field(max_length=200,
+                                       description="Devolve só os artigos/anexos que contêm estas palavras.")] = None,
     modo: Annotated[Literal["vigente", "historico"], Field(
         description='"vigente": só a redação atual; "historico": inclui redações anteriores (~~riscadas~~).')] = "vigente",
     incluir_notas: Annotated[bool, Field(
@@ -204,7 +203,7 @@ async def buscar_normas(
 @_ferramenta(annotations=LEITURA)
 async def historico_alteracoes(
     referencia: Referencia,
-    dispositivo: Annotated[str | None, Field(description=(
+    dispositivo: Annotated[str | None, Field(max_length=300, description=(
         'Restringe a um dispositivo ("art. 74", "art. 2º, § 5º", "art. 22, caput"); inclui o que ele contém, '
         "registros no nível do artigo e alterações da norma inteira."))] = None,
     desde: Data = None,
@@ -240,7 +239,8 @@ async def novidades_legislativas(
     tema: Annotated[str | None, Field(description=(
         'Tema: "IRPJ", "CSLL", "PIS/COFINS", "IBS/CBS"... (veja listar_temas; aceita "IRPJ/CSLL"). Inclui normas de '
         "ementa genérica que alteram as normas-núcleo do tema."))] = None,
-    termos: Annotated[list[str] | None, Field(description="Termos adicionais de filtro na ementa.")] = None,
+    termos: Annotated[list[Annotated[str, Field(max_length=200)]] | None, Field(
+        max_length=20, description="Termos adicionais de filtro na ementa.")] = None,
     limite: Annotated[int, Field(ge=1, le=500)] = 100,
 ) -> dict:
     """Normas federais publicadas recentemente (revalida os quadros do Planalto na hora)."""
@@ -254,8 +254,9 @@ async def mapear_tema(
         "Tema pré-configurado (IRPJ, CSLL, PIS/COFINS, IRPF, IRRF, IPI, IOF, SIMPLES, IBS/CBS, PRECOS DE "
         "TRANSFERENCIA, TRIBUTACAO INTERNACIONAL, PREVIDENCIARIAS, PROCESSO FISCAL, CTN, ICMS/ISS), "
         'combinação ("IRPJ/CSLL") ou texto livre.'))],
-    termos_extras: Annotated[list[str] | None, Field(description="Termos adicionais (sintaxe de buscar_normas).")] = None,
-    normas_extras: Annotated[list[str] | None, Field(description=(
+    termos_extras: Annotated[list[Annotated[str, Field(max_length=200)]] | None, Field(
+        max_length=30, description="Termos adicionais (sintaxe de buscar_normas).")] = None,
+    normas_extras: Annotated[list[Annotated[str, Field(max_length=300)]] | None, Field(max_length=50, description=(
         'Normas adicionais para o núcleo; aceita escopo: "Lei 9.430/1996, arts. 18 a 24-C".'))] = None,
     tipos: Tipos = None,
     ano_inicio: Annotated[int | None, Field(ge=1800, le=2100)] = None,

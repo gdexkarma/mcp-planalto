@@ -198,7 +198,11 @@ class Banco:
                 c.execute("ROLLBACK")
                 raise
             else:
-                c.execute("COMMIT")
+                try:
+                    c.execute("COMMIT")
+                except BaseException:
+                    c.execute("ROLLBACK")
+                    raise
 
     # ------------------------------------------------------------ meta
     def meta(self, chave: str, padrao: str | None = None) -> str | None:

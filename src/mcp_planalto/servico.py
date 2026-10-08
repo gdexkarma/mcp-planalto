@@ -53,6 +53,26 @@ except Exception:  # pragma: no cover - sem base de fusos
     FUSO = dt.timezone(dt.timedelta(hours=-3))
 
 
+class Atividade:
+    """Contador de sincronizações em curso (várias podem se sobrepor); is_set() como threading.Event."""
+
+    def __init__(self):
+        self._n = 0
+        self._lock = threading.Lock()
+
+    def __enter__(self):
+        with self._lock:
+            self._n += 1
+        return self
+
+    def __exit__(self, *exc):
+        with self._lock:
+            self._n -= 1
+
+    def is_set(self) -> bool:
+        return self._n > 0
+
+
 class NormaNaoEncontrada(Exception):
     def __init__(self, mensagem: str, candidatos: list[Norma] | None = None):
         super().__init__(mensagem)
@@ -218,7 +238,7 @@ class Legislacao:
         self._detalhes: collections.OrderedDict[str, tuple[float, DetalheSenado]] = collections.OrderedDict()
         self._lock = threading.Lock()
         self._sync_lock = threading.Lock()
-        self.sincronizando = threading.Event()
+        self.sincronizando = Atividade()
 
     # ================================================================ resolução
     def resolver(self, texto: str) -> Norma:
@@ -690,6 +710,7 @@ class Legislacao:
     def buscar(self, consulta: str, tipos: list[str] | None = None, ano_inicio: int | None = None,
                ano_fim: int | None = None, limite: int = 20, pagina: int = 1) -> dict:
         tipos = normalizar_tipos(tipos)
+        _validar_anos(ano_inicio, ano_fim)
         limite = max(1, min(int(limite), 100))
         pagina = max(1, int(pagina))
         res, total = self.db.buscar(consulta, tipos, ano_inicio, ano_fim, limite, (pagina - 1) * limite)
@@ -732,9 +753,7 @@ class Legislacao:
         h = hoje()
         ano_ini = h.year - 1 if h.month <= 2 else h.year
         n = 0
-        ja_sincronizando = self.sincronizando.is_set()
-        self.sincronizando.set()
-        try:
+        with self.sincronizando:
             for tipo in TIPOS_CATALOGO:
                 if tipo in ("DEL", "LDL"):
                     continue
@@ -744,9 +763,6 @@ class Legislacao:
                     log.warning("Falha ao atualizar quadro %s: %s", tipo, e)
                     continue
                 n += self._salvar_entradas(es)
-        finally:
-            if not ja_sincronizando:
-                self.sincronizando.clear()
         self.db.set_meta("recentes_em", agora())
         return n
 
@@ -889,6 +905,7 @@ class Legislacao:
         termos = [t for t in dict.fromkeys(termos) if t and t.strip()]
         nucleo_txt = [c for t in temas for c in t.nucleo] + list(normas_extras or [])
         tipos = normalizar_tipos(tipos)
+        _validar_anos(ano_inicio, ano_fim)
         profundidade = max(1, min(int(profundidade), 2))
         avisos: list[str] = []
 
@@ -1147,11 +1164,16 @@ class Legislacao:
         tipos = normalizar_tipos(tipos) or TIPOS_CATALOGO
         if not self._sync_lock.acquire(blocking=False):
             raise RuntimeError("Já existe uma sincronização em andamento neste processo.")
-        self.sincronizando.set()
+        self.sincronizando.__enter__()
         try:
             resumo = {}
+            falhas: list[str] = []
             for tipo in tipos:
-                es = self.indices.entradas(tipo, ano_inicio=ano_inicio, max_idade=12 * 3600)
+                try:
+                    es = self.indices.entradas(tipo, ano_inicio=ano_inicio, max_idade=12 * 3600, falhas=falhas)
+                except ErroHTTP as e:  # página-raiz do tipo indisponível
+                    falhas.append(f"{tipo}: {e}")
+                    continue
                 resumo[tipo] = self._salvar_entradas(es)
                 aviso(f"Planalto {tipo}: {resumo[tipo]} normas")
             if senado:
@@ -1169,12 +1191,17 @@ class Legislacao:
                                 n.ementa = None
                         total += self.db.salvar(normas)
                     aviso(f"Senado {tipo}: {total} normas")
-            if set(tipos) >= set(TIPOS_CATALOGO) and not ano_inicio:
-                # só a carga completa marca o catálogo como pronto (uma carga interrompida é retomada)
+            if set(tipos) >= set(TIPOS_CATALOGO) and not ano_inicio and not falhas:
+                # só a carga completa e sem falhas marca o catálogo como pronto (senão é retomada no próximo início)
                 self.db.set_meta("catalogo_em", agora())
-            return {"normas_por_tipo": resumo, **self.db.estatisticas()}
+            out = {"normas_por_tipo": resumo, **self.db.estatisticas()}
+            if falhas:
+                out["quadros_com_falha"] = falhas
+                out["aviso"] = (f"{len(falhas)} quadro(s) do Planalto não puderam ser lidos; a carga será completada na "
+                                "próxima sincronização.")
+            return out
         finally:
-            self.sincronizando.clear()
+            self.sincronizando.__exit__()
             self._sync_lock.release()
 
     def sincronizar_detalhes(self, tipos: list[str] | None = None, ano_inicio: int | None = None,
@@ -1194,9 +1221,8 @@ class Legislacao:
         def um(n: Norma):
             return n, self.senado.detalhe(n.ref, max_idade=30 * 24 * 3600)
 
-        self.sincronizando.set()
-        try:
-            with ThreadPoolExecutor(max_workers=max(1, min(paralelo, 8))) as ex:
+        with self.sincronizando, ThreadPoolExecutor(max_workers=max(1, min(paralelo, 8))) as ex:
+            if True:
                 futuros = [ex.submit(um, n) for n in pendentes]
                 for i, fut in enumerate(as_completed(futuros), 1):
                     try:
@@ -1218,8 +1244,6 @@ class Legislacao:
                     if i % 100 == 0:
                         taxa = i / max(1, time.time() - inicio)
                         aviso(f"Detalhes: {i}/{len(pendentes)} ({taxa:.1f}/s, falhas {falhas})")
-        finally:
-            self.sincronizando.clear()
         self.db.set_meta("detalhes_em", agora())
         return {"processadas": len(pendentes), "com_detalhe": ok, "sem_registro_no_senado": vazios,
                 "falhas": falhas, **self.db.estatisticas()}
@@ -1242,6 +1266,11 @@ class Legislacao:
 
 
 # ---------------------------------------------------------------- utilitários
+
+def _validar_anos(ano_inicio: int | None, ano_fim: int | None) -> None:
+    if ano_inicio and ano_fim and ano_inicio > ano_fim:
+        raise ValueError(f"Intervalo de anos invertido: ano_inicio {ano_inicio} > ano_fim {ano_fim}.")
+
 
 def _sufixo_reedicao(chave: str) -> int:
     m = re.search(r"-(\d+):", chave)
