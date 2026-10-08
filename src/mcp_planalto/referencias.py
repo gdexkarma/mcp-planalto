@@ -42,13 +42,17 @@ _PADROES_TIPO: list[tuple[str, str]] = [
     (r"\blei(\s+federal|\s+ordinaria)?\b|\bl\.", "LEI"),
 ]
 _RE_CF = re.compile(r"constituicao(\s+(federal|da republica)[\w\s]*)?|\bcf\b|\bcrfb\b")
-# Atos que não são normas federais tratadas aqui: recusados com mensagem clara.
+# Atos que não são normas federais tratadas aqui. Recusados quando aparecem ANTES da norma encontrada
+# ("Portaria MF 343 e Lei 9.430" -> recusa) ou são o próprio tipo ("Decreto Legislativo nº 2"); depois
+# dela são só contexto ("Lei 9.430/96 e Portaria MF 343/2015" -> Lei 9.430).
 _BLOQUEIO = re.compile(
-    r"\b(projeto|pl|plp|pec|plv|estadual|municipal|distrital|portaria|instrucao normativa|resolucao|"
-    r"ato declaratorio|solucao de consulta|parecer|decreto legislativo|ato complementar|lei constitucional|"
-    r"emenda constitucional de revisao|ecr|decreto do conselho|sumula|acordao|convenio|deliberacao|"
-    r"do estado|lei organica)\b"
+    r"\b(projeto|pl|plp|pec|plv|portaria|instrucao normativa|in (?:rfb|srf|sn|cgsn|conjunta)|resolucao|"
+    r"ato declaratorio|ade|solucao de (?:consulta|divergencia)|sc (?:cosit|disit)|parecer normativo|pn|"
+    r"decreto legislativo|ato complementar|lei constitucional|emenda constitucional de revisao|ecr|"
+    r"decreto do conselho|sumula|acordao|convenio|deliberacao|lei organica|adi|adc|adpf)\b"
 )
+# Qualificadores colados à norma: "Lei Estadual 6.374", "Constituição do Estado de São Paulo".
+_QUALIFICADOR = re.compile(r"[^,;()]{0,25}?\b(estadual|municipal|distrital|do estado|do municipio|do distrito)\b")
 _NUMERO_APOS = r"\s*(?:n\.?\s*[º°o]?s?\.?\s*)?(?=\d)"
 
 # Apelidos usuais na prática tributária.
@@ -111,6 +115,26 @@ APELIDOS: dict[str, tuple[str, str, int]] = {
     "lei do ibs": ("LCP", "214", 2025),
     "lei do ibs/cbs": ("LCP", "214", 2025),
     "lgpd": ("LEI", "13709", 2018),
+    "lei anticorrupcao": ("LEI", "12846", 2013),
+    "marco civil da internet": ("LEI", "12965", 2014),
+    "marco civil": ("LEI", "12965", 2014),
+    "lei de falencias": ("LEI", "11101", 2005),
+    "lei de licitacoes": ("LEI", "14133", 2021),
+    "nova lei de licitacoes": ("LEI", "14133", 2021),
+    "lei do simples": ("LCP", "123", 2006),
+    "lei de improbidade": ("LEI", "8429", 1992),
+    "lei de improbidade administrativa": ("LEI", "8429", 1992),
+    "lei do mandado de seguranca": ("LEI", "12016", 2009),
+    "lei de introducao as normas do direito brasileiro": ("DEL", "4657", 1942),
+    "codigo de processo penal": ("DEL", "3689", 1941),
+    "cpp": ("DEL", "3689", 1941),
+    "lei da transacao": ("LEI", "13988", 2020),
+    "lei das estatais": ("LEI", "13303", 2016),
+    "lei de lavagem de dinheiro": ("LEI", "9613", 1998),
+    "lei dos crimes contra a ordem tributaria": ("LEI", "8137", 1990),
+    "lei de crimes contra a ordem tributaria": ("LEI", "8137", 1990),
+    "lei dos juizados especiais federais": ("LEI", "10259", 2001),
+    "cc/02": ("LEI", "10406", 2002),
     "lei de recuperacao judicial": ("LEI", "11101", 2005),
 }
 
@@ -172,7 +196,8 @@ class Referencia:
 _RE_NUM = re.compile(
     r"(?:n\.?\s*[º°o]?s?\.?\s*)?(?P<num>\d{1,3}(?:\.\d{3})+|\d+)(?P<reed>-[a-z](?![a-z])|-\d+)?"
     r"(?:\s*(?:/|,?\s*de\s+(?:\d{1,2}(?:º|°)?\s+de\s+[a-zç]+\s+de\s+|\d{1,2}[./-]\d{1,2}[./-])?|\s+)"
-    r"(?P<ano>\d{4}|\d{2})(?!\d))?",
+    # ano: "1996", "96", "1.996"; nunca o dia de "de 27 de dezembro"
+    r"(?P<ano>[12]\.\d{3}|\d{4}|\d{2})(?!\d)(?!\s*[º°]?\s+de\s+[a-z]))?",
 )
 
 
@@ -207,8 +232,12 @@ def _localizar(n: str) -> tuple[int, int, str, Referencia | None] | None:
 
 def _preparar(texto: str) -> str:
     n = normalizar(texto)
+    n = re.sub(r"\blei-complementar\b", "lei complementar", n)
+    n = re.sub(r"(?<=[a-z])-(?=\d)", " ", n)  # "lc-214" -> "lc 214"
     n = re.sub(r"(?<=[a-z])(?=\d)", " ", n)  # "lei9430" -> "lei 9430"
     n = re.sub(r"\s*/\s*", "/", n)  # "9.430 / 96" -> "9.430/96"
+    # espaço como separador de milhar logo após o tipo: "lei 9 430/96" -> "lei 9430/96"
+    n = re.sub(r"(\b(?:lei|decreto|lc|lcp|mp|mpv|dl|del|ec|n[º°o]?\.?)\s+\d{1,3}) (\d{3})\b", r"\1\2", n)
     return n
 
 
@@ -233,9 +262,16 @@ def interpretar_citacao(texto: str) -> tuple[Referencia, str | None]:
 
     achado = _localizar(n)
     bloqueio = _BLOQUEIO.search(n)
-    if bloqueio and (not achado or bloqueio.start() <= achado[0] + 25):
+    qualif = _QUALIFICADOR.match(n, achado[0]) if achado else _QUALIFICADOR.search(n)
+    if bloqueio and (not achado or bloqueio.start() <= achado[0]):
+        motivo = bloqueio.group(0)
+    elif qualif:
+        motivo = qualif.group(1)
+    else:
+        motivo = None
+    if motivo:
         raise ValueError(
-            f"'{bloqueio.group(0)}' não é norma federal coberta por este servidor (leis, LCs, decretos, "
+            f"'{motivo}' não é norma federal coberta por este servidor (leis, LCs, decretos, "
             "decretos-leis, MPs, emendas e a Constituição de 1988)."
         )
     if not achado:
@@ -249,12 +285,16 @@ def interpretar_citacao(texto: str) -> tuple[Referencia, str | None]:
         m = _RE_NUM.match(n, fim)
         numero = m.group("num").replace(".", "").lstrip("0") or "0"
         reed = m.group("reed")
+        bruto_ano = m.group("ano")
+        if reed and tipo != "MPV" and reed[1:].isdigit() and not bruto_ano and len(reed) in (3, 5):
+            bruto_ano, reed = reed[1:], None  # "Lei 9.430-96": o sufixo é o ano
         if reed:
             numero += reed.upper() if reed[1:].isalpha() else reed
         ano, ambiguo = None, False
-        if m.group("ano"):
-            ano = ano_completo(int(m.group("ano")))
-            ambiguo = len(m.group("ano")) == 2
+        if bruto_ano:
+            bruto_ano = bruto_ano.replace(".", "")
+            ano = ano_completo(int(bruto_ano))
+            ambiguo = len(bruto_ano) == 2
         ref = Referencia(tipo, numero, ano, ambiguo)
         depois = n[m.end():]
     else:
@@ -264,11 +304,15 @@ def interpretar_citacao(texto: str) -> tuple[Referencia, str | None]:
         depois = re.sub(r"^\s*(/|de\s+)(1988|88)\b", "", depois)
     # dispositivo citado antes ("art. 74 da Lei...") ou depois ("Lei 9.430/96, art. 74")
     disp = None
-    m_antes = re.match(r"(.*?\b(art|§|paragrafo|inciso|alinea|caput)\b.*?)\s*,?\s*(d[aoe]s?|n[ao]s?)?\s*$", antes)
-    if m_antes and re.search(r"\bart|§", antes):
+    m_antes = re.match(r"(.*?(?:\b(?:arts?|artigos?|paragrafos?|incisos?|alineas?|caput)\b|§).*?)\s*,?\s*"
+                       r"(d[aoe]s?|n[ao]s?)?\s*$", antes)
+    m_depois = re.match(r"\s*(?:\([^)]*\)\s*)?[(:\-–,]?\s*(?:em seu\s+|no\s+)?(?=arts?\b|artigos?\b|§)", depois)
+    if m_antes and re.search(r"\bart|§|paragrafo|inciso|alinea", antes):
         disp = m_antes.group(1).strip(" ,")
-    elif re.match(r"\s*,?\s*(art|§)", depois):
-        disp = depois.strip(" ,.;")
+    elif m_depois:
+        disp = re.split(r"[;]|\s+(?:c/c|e da|e do)\s+", depois[m_depois.end():])[0]
+        disp = disp.replace(")", " ").replace("(", " ").strip(" ,.;:")
+        disp = re.sub(r"\s+", " ", disp)
     if disp and "adct" in n[ini:fim + 6]:
         disp = f"{disp} do ADCT"
     return ref, disp

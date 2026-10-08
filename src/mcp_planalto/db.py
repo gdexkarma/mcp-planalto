@@ -365,8 +365,21 @@ class Banco:
             c.executemany("INSERT OR REPLACE INTO mp_reedicoes VALUES (?,?)", list(mapa.items()))
 
     def familia_mp(self, numero: str) -> str | None:
-        r = self.conexao().execute("SELECT chave_final FROM mp_reedicoes WHERE numero=?", (numero,)).fetchone()
-        return r[0] if r else None
+        """Última edição da família da MP. Segue cadeias (528 -> 878 -> 1.472-31)."""
+        c = self.conexao()
+        atual, vistos = None, set()
+        while numero and numero not in vistos and len(vistos) < 10:
+            vistos.add(numero)
+            r = c.execute("SELECT chave_final FROM mp_reedicoes WHERE numero=?", (numero,)).fetchone()
+            if not r and "-" not in numero and atual is None:
+                # originária que não aparece como link: usa a família de qualquer edição dela ("1991-15")
+                r = c.execute("SELECT chave_final FROM mp_reedicoes WHERE numero LIKE ? LIMIT 1",
+                              (numero + "-%",)).fetchone()
+            if not r or r[0] == atual:
+                break
+            atual = r[0]
+            numero = atual.split(":")[1]
+        return atual
 
     def senado_id(self, chave: str) -> str | None:
         r = self.conexao().execute(

@@ -226,18 +226,40 @@ class Legislacao:
         ref = interpretar(texto)
         tentativas = [ref]
         if ref.ano_ambiguo and ref.ano:  # "Lei 1.234/24": 2024 ou 1924?
-            tentativas.append(ref.com_ano(ref.ano - 100 if ref.ano > 1999 else ref.ano + 100))
+            outro = ref.ano - 100 if ref.ano > 1999 else ref.ano + 100
+            if outro <= hoje().year:
+                tentativas.append(ref.com_ano(outro))
         erro = None
         for r in tentativas:
             try:
                 return self._resolver_ref(r)
             except NormaNaoEncontrada as e:
                 erro = erro or e
+        if len(tentativas) > 1 and not erro.candidatos:
+            raise NormaNaoEncontrada(f"Não encontrei {tentativas[0].nome} nem {tentativas[1].nome}.")
         raise erro
+
+    def _familia_com_texto(self, ref: Referencia) -> Norma | None:
+        """MP reeditada antes da EC 32/2001: a última edição da família (que tem texto no Planalto)."""
+        if ref.tipo != "MPV" or (ref.ano and ref.ano > 2001):
+            return None
+        base = ref.numero.split("-")[0]
+        if ref.ano == 2001 and base.isdigit() and int(base) < 1000:
+            return None  # numeração nova, pós-EC 32
+        fam = self.db.familia_mp(ref.numero)
+        n = self.db.obter(fam) if fam else None
+        return n if n and n.chave != ref.chave else None
 
     def _resolver_ref(self, ref: Referencia) -> Norma:
         if ref.ano and ref.ano > hoje().year:
             raise NormaNaoEncontrada(f"{ref.nome}: o ano {ref.ano} ainda não chegou.")
+        if ref.tipo == "EMC" and ref.ano and ref.ano < 1992:
+            raise NormaNaoEncontrada(f"{ref.nome}: emendas anteriores a 1992 são à Constituição de 1967/69, "
+                                     "que não é coberta.")
+        if not ref.ano and ref.tipo == "MPV" and not self.db.candidatos(ref):
+            fam = self._familia_com_texto(ref)
+            if fam:
+                return fam
         if not ref.ano and ref.tipo != "CF":
             cands = self.db.candidatos(ref)
             exatos = [c for c in cands if c.numero == ref.numero]
@@ -266,19 +288,16 @@ class Legislacao:
         n = self.db.obter(ref.chave)
         if n and n.url_planalto:
             return n
+        # MP intermediária de família reeditada (antes da EC 32/2001): a última edição tem o texto
+        fam = self._familia_com_texto(ref)
+        if fam:
+            return fam
         e = self.indices.localizar(ref.tipo, ref.numero, ref.ano)
         if e:
             self._salvar_entradas([e])
             return self.db.obter(Referencia(e.tipo, e.numero, e.ano).chave)
         if n:
             return n
-        # MP intermediária de família reeditada (antes da EC 32/2001): usa a última edição
-        if ref.tipo == "MPV" and ref.ano and ref.ano <= 2001:
-            fam = self.db.familia_mp(ref.numero)
-            if fam:
-                n = self.db.obter(fam)
-                if n:
-                    return n
         det, _aviso = self._buscar_detalhe(ref)
         if det:
             return self.db.obter(det.norma.chave)
@@ -291,8 +310,12 @@ class Legislacao:
             ref = Referencia(e.tipo, e.numero, e.ano)
             for r in e.reedicoes:
                 reedicoes[r] = ref.chave
+            data = e.data
+            atual = self.db.obter(ref.chave)
+            if atual and atual.detalhe_em and atual.data:
+                data = None  # a data do Senado (conferida com a epígrafe) prevalece sobre erros de digitação do quadro
             normas.append(Norma(
-                chave=ref.chave, tipo=e.tipo, numero=e.numero, ano=e.ano, data=e.data, ementa=e.ementa or None,
+                chave=ref.chave, tipo=e.tipo, numero=e.numero, ano=e.ano, data=data, ementa=e.ementa or None,
                 url_planalto=e.url, origem="planalto", atualizado_em=agora(),
                 situacao=e.situacao if e.tipo == "MPV" and e.situacao and e.situacao != "-" else None,
             ))

@@ -48,7 +48,7 @@ _FILTRO_QUADRO = {
 _RE_NUMERO = re.compile(
     r"(?:n[º°o]\.?\s*)?(\d{1,3}(?:\.\d{3})+|\d+)(-[A-Z](?![a-z])|-\d+)?", re.I
 )
-_RE_DATA = re.compile(r"(\d{1,2})[º°]?\s*[./]\s*(\d{1,2})\s*[./]\s*(\d{4}|\d{2})(?!\d)")
+_RE_DATA = re.compile(r"(\d{1,2})[º°]?\s*[./]{1,2}\s*(\d{1,2})\s*[./]{1,2}\s*(\d{4}|\d{2})(?!\d)")
 _RE_DATA_EXTENSO = re.compile(r"(\d{1,2})[º°]?\s+de\s+([a-zç]+)\s+de\s+(\d{4})", re.I)
 _MESES = {m: i for i, m in enumerate(
     ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto",
@@ -92,6 +92,18 @@ def _data(texto: str, ano_max: int | None = None) -> str | None:
         return None
 
 
+def _ano_de_data_invalida(texto: str, ano_max: int | None) -> int | None:
+    """Data malformada no quadro ("31.4.69"): o dia não existe, mas o ano é aproveitável."""
+    m = _RE_DATA.search(texto)
+    if not m:
+        return None
+    bruto = m.group(3)
+    a = ano_completo(int(bruto))
+    if len(bruto) == 2 and ano_max and a > ano_max:
+        a -= 100
+    return a
+
+
 def _numero_do_arquivo(url: str | None) -> int | None:
     if not url:
         return None
@@ -105,10 +117,27 @@ _RE_LIXO_EMENTA = re.compile(
     r"Regulamento|Vig[êe]ncia)\s*(?=$|\s(Mensagem|Vide|Texto|\())"
 )
 _RE_SITUACAO_MP = re.compile(
-    r"(?<=[.;)])\s*((Em Tramita[çc][ãa]o|Convertid[ao]|Revogad[ao]|Rejeitad[ao]|Sem efic[áa]cia|Prejudicad[ao]|"
+    r"(?:(?<=[.;)])\s*|\s+(?=Convertid[ao]\s+(?:na\s+|em\s+)?Lei\b))"
+    r"((Em Tramita[çc][ãa]o|Convertid[ao]|Revogad[ao]|Rejeitad[ao]|Sem efic[áa]cia|Prejudicad[ao]|"
     r"Perdeu|Vig[êe]ncia encerrada|Encerrad[ao])\b.*)$",
     re.I,
 )
+
+
+def _links_texto(celula, base_url: str) -> list[str]:
+    out = []
+    for a in celula.iter("a"):
+        h = (a.get("href") or "").strip()
+        if not h or h.startswith(("#", "mailto:", "javascript:")):
+            continue
+        hl = h.lower()
+        if re.search(r"\.(pdf|doc|docx)$", hl) or "/msg/" in hl or "mensagem" in hl or "/exm/" in hl:
+            continue
+        if re.search(r"\.html?(#.*)?$", hl):
+            u = urljoin(base_url, h.split("#")[0])
+            if u not in out:
+                out.append(u)
+    return out
 
 
 def _link_texto(celula, base_url: str) -> str | None:
@@ -155,7 +184,7 @@ def ler_quadro(conteudo: str, tipo: str, base_url: str, ano_ini: int | None = No
         elif reed:  # lei/decreto com letra (raro): 1.234-A
             numero += reed.upper()
         data = _data(cab, ano_fim)
-        ano = int(data[:4]) if data else None
+        ano = int(data[:4]) if data else _ano_de_data_invalida(cab, ano_fim)
         if ano is None and len(partes) > 1:
             # sem data de assinatura legível: usa o ano da publicação no DOU, se couber no quadro
             pub = _data(partes[1], ano_fim)
@@ -163,13 +192,17 @@ def ler_quadro(conteudo: str, tipo: str, base_url: str, ano_ini: int | None = No
                 ano = int(pub[:4])
         if ano is None and ano_ini and ano_ini == ano_fim:
             ano = ano_ini
-        url = _link_texto(celulas[0], base_url) or _link_texto(celulas[1], base_url)
-        n_arq = _numero_do_arquivo(url)
         base_num = int(re.match(r"\d+", numero).group(0))
-        if url and n_arq is not None and n_arq != base_num and tipo != "CF":
-            log.info("Quadro %s: link de %s %s aponta para outro número (%s); link descartado", base_url, tipo,
-                     numero, url)
-            url = None
+        links = _links_texto(celulas[0], base_url) + _links_texto(celulas[1], base_url)
+        # entre os links da linha, o que traz o número da norma no nome do arquivo
+        url = next((u for u in links if _numero_do_arquivo(u) == base_num), None)
+        if not url and links:
+            n_arq = _numero_do_arquivo(links[0])
+            if n_arq is None:
+                url = links[0]
+            else:
+                log.info("Quadro %s: link de %s %s aponta para outro número (%s); link descartado", base_url, tipo,
+                         numero, links[0])
         for a in list(celulas[1].iter("a")):  # links de mensagem de veto/exposição de motivos/compilado
             h = (a.get("href") or "").lower()
             if re.search(r"/msg/|vep|mensagem|/exm/|\.pdf$|compilad", h) or \
@@ -188,7 +221,7 @@ def ler_quadro(conteudo: str, tipo: str, base_url: str, ano_ini: int | None = No
             # "Originária: 1.636 Edições: 1.636-1, ..., 2.189-48" (quadros anteriores à EC 32/2001).
             # Só os links contam: o texto pode citar "Del nº 2.474, 1988 - Transformado em MPV nº 2".
             for a in celulas[2].iter("a"):
-                txt = _limpo(a.text_content())
+                txt = _limpo(a.text_content()).strip(" ,;.")
                 if re.fullmatch(r"\d{1,3}(?:\.\d{3})*(?:-\d+)?", txt):
                     num = txt.replace(".", "").lstrip("0")
                     if num and num != numero and num not in reedicoes:
