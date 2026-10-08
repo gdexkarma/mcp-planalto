@@ -98,7 +98,7 @@ def data_efeitos(texto: str, publicacao: dt.date | None) -> dt.date | None:
         m = re.search(r"\b(?:primeiro dia|1o? de janeiro) do (?:ano|exercicio(?: financeiro)?) (?:subsequente|seguinte)", n)
         if m:
             candidatos.append((m.start(), dt.date(publicacao.year + 1, 1, 1)))
-        m = re.search(r"\bna data de (?:sua )?publicacao", n)
+        m = re.search(r"\b(?:na data|a partir) d[ae] (?:sua )?publicacao", n)
         if m and not candidatos:  # "entra em vigor na publicação e produz efeitos a partir de...": vale o efeito
             candidatos.append((m.start(), publicacao))
     if not candidatos:

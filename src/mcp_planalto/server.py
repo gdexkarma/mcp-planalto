@@ -196,8 +196,19 @@ async def ler_norma(
     if r.get("contexto"):
         cab.append(f"Contexto (dispositivo superior): {r['contexto']}")
     for v in r.get("vigencia_das_leis_alteradoras", []):
-        cab.append(f"Vigência da {v['norma']}, que deu a redação de {', '.join(v['dispositivos']) or 'parte do trecho'} "
-                   f"({v['artigo']}; confira também regras de transição nela): {v['clausula']}")
+        linha = f"Vigência da {v['norma']}"
+        if v.get("ementa"):
+            linha += f" (ementa: {v['ementa'][:300]})"
+        for e in v.get("efeitos_no_trecho_lido", []):
+            data = f"{e['data'][8:10]}/{e['data'][5:7]}/{e['data'][:4]}"
+            linha += (f" — redação de {', '.join(e['dispositivos'])} dada pelo {e['artigo_alterador']}: "
+                      + (f"em vigor desde {data} (a cláusula não fixa outra data de efeitos; veja se o próprio "
+                         "dispositivo fixa termo inicial)" if e.get("so_vigencia") else f"efeitos a partir de {data}")
+                      + f", pelo {v['artigo']} (\"{e['regra']}\")")
+        if not v.get("efeitos_no_trecho_lido"):
+            linha += f" — deu a redação de {', '.join(v['dispositivos']) or 'parte do trecho'}"
+        cab.append(linha + f". Cláusula completa ({v['artigo']}; procure também regras de transição nela): "
+                   f"{v['clausula']}")
     for k, rot in (("observacao_numeracao", "Numeração"), ("notas_gerais", "Notas"),
                    ("notas_de_vigencia_da_norma", "Notas de vigência da norma (valem para todo o texto)"),
                    ("anexos", "Anexos")):

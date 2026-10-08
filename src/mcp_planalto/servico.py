@@ -474,6 +474,32 @@ def _escopo_revogado(texto: str, ref: Referencia) -> Callable[[str], bool] | Non
     return lambda art: any(f(art) for f in filtros)
 
 
+def _regra_de_efeitos(bl_clausula: list, art_alt: str, alt: Documento) -> str | None:
+    """Trecho da cláusula de vigência que vale para o artigo `art_alt` da norma alteradora: o inciso ou alínea
+    que o cita ("aos arts. 7º e 9º") ou, na falta, o que fala dos "demais dispositivos". Alínea vem com o texto
+    do inciso a que pertence (a data costuma estar no inciso). Cláusula sem incisos: o caput."""
+    itens = [b for b in bl_clausula if b.chave and len(b.chave) > 1 and b.vigente.strip()]
+    caput = _espacos_txt(" ".join(b.vigente for b in bl_clausula if b.chave and len(b.chave) == 1))
+    if not itens:
+        return caput or None
+
+    def com_pai(b) -> str:
+        pais = [p.vigente for p in itens if len(p.chave) < len(b.chave) and b.chave[:len(p.chave)] == p.chave]
+        return _espacos_txt(" ".join(pais + [b.vigente]))
+
+    achados = [b for b in itens if art_alt in _artigos_citados(b.vigente, alt)]
+    if not achados:
+        achados = [b for b in itens if re.search(r"\bdemais\b", normalizar(b.vigente))]
+    if len(achados) != 1:
+        return None
+    regra = com_pai(achados[0])
+    # "produz efeitos a partir de: I – 1º de janeiro de 2026, quanto aos arts. ...": o termo inicial está no caput
+    if re.search(r"a partir|na data|apos|decorrid", normalizar(regra)):
+        return regra
+    sem_rotulo = re.sub(r"^\s*[IVXLC]+\s*[-–—]\s*", "", regra)
+    return _espacos_txt(re.sub(r":\s*$", "", caput.strip()) + " " + sem_rotulo)
+
+
 def _redacao_anterior(doc: Documento, b) -> str | None:
     """Redação riscada imediatamente anterior do mesmo dispositivo (a que ainda vale até a data de efeitos)."""
     try:
@@ -855,8 +881,18 @@ class Legislacao:
             if vig_alt:
                 cab["vigencia_das_leis_alteradoras"] = vig_alt
                 ja = {f["norma"] for f in futuros}
+                hoje_iso = hoje().isoformat()
+                for v in vig_alt:
+                    if v["norma"] in ja:
+                        continue
+                    for e in v.get("efeitos_no_trecho_lido", []):
+                        if e["data"] > hoje_iso:
+                            alertas.append(f"a redação de {', '.join(e['dispositivos'])} dada pela {v['norma']} "
+                                           f"({e['artigo_alterador']}) só produz efeitos a partir de "
+                                           f"{_data_br(e['data'])} ({v['artigo']} dela); até lá vale a redação "
+                                           "anterior (use modo='historico')")
                 datas = [f"{v['norma']} ({v['artigo']}): {_data_br(v['data_futura'])}" for v in vig_alt
-                         if v.get("data_futura") and v["norma"] not in ja]
+                         if v.get("data_futura") and v["norma"] not in ja and not v.get("efeitos_no_trecho_lido")]
                 if datas:
                     cab["aviso_vigencia"] = ("a cláusula de vigência de norma que deu a redação lida menciona efeitos "
                                              "em data futura — " + "; ".join(datas) + ". Confira na cláusula se a "
@@ -976,9 +1012,13 @@ class Legislacao:
     def _vigencia_das_alteradoras(self, doc: Documento, blocos: list, anos: int = 2, maximo: int = 3,
                                   prazo: float = 12.0) -> list[dict]:
         """Cláusula de vigência das normas recentes que deram a redação lida ("Redação dada/Incluído pela Lei X,
-        de 2025"). A data de efeitos e o escalonamento costumam estar nela, e não na nota do compilado."""
+        de 2025"). A data de efeitos e o escalonamento costumam estar nela, e não na nota do compilado.
+
+        O link da nota aponta o artigo da norma alteradora que mudou o dispositivo ("Lcp224.htm#art8"); com ele
+        se escolhe, na cláusula, o inciso que vale para o trecho lido ("III - a partir de 1º de janeiro de 2026,
+        em relação aos demais dispositivos")."""
         inicio, ano_min = time.time(), hoje().year - anos
-        por_url: dict[str, list[str]] = {}
+        por_url: dict[str, dict[str | None, list[str]]] = {}
         for b in blocos:
             if b.obsoleto or b.revogado or not b.vigente:
                 continue
@@ -988,15 +1028,17 @@ class Legislacao:
                     continue
                 if not any(int(a) >= ano_min for a in re.findall(r"\b(?:19|20)\d\d\b", texto)):
                     continue
-                url = href.partition("#")[0]
+                url, _, frag = href.partition("#")
                 if not url or url.lower() == doc.url.split("#")[0].lower():
                     continue
+                m = re.match(r"art(\d+)(?:-([a-z]))?(?![a-z])", frag.lower())
+                art_alt = m.group(1) + (m.group(2) or "") if m else None
                 rot = rotulo_dispositivo(b.chave) if b.chave else None
-                lista = por_url.setdefault(url, [])
+                lista = por_url.setdefault(url, {}).setdefault(art_alt, [])
                 if rot and rot not in lista:
                     lista.append(rot)
         out = []
-        for url, dispositivos in list(por_url.items())[:maximo]:
+        for url, por_art in list(por_url.items())[:maximo]:
             if time.time() - inicio > prazo:
                 break
             try:
@@ -1004,23 +1046,43 @@ class Legislacao:
             except Exception as e:  # portal fora ou link quebrado: segue sem a cláusula
                 log.info("Norma alteradora indisponível (%s): %s", url, e)
                 continue
-            clausula, art = None, None
+            clausula, art, bl_clausula = None, None, []
             for a in reversed(alt.artigos("")[-10:]):
-                txt = _espacos_txt(" ".join(x.vigente for x in alt.selecionar(f"art. {a}") if not x.obsoleto))
+                bl = [x for x in alt.selecionar(f"art. {a}") if not x.obsoleto]
+                txt = _espacos_txt(" ".join(x.vigente for x in bl))
                 if re.search(r"entr(a|ara|am|arao) em vigor|produz(ira|em|irao|indo)? efeitos?|vigencia",
                              normalizar(txt)):
                     # sem o fecho ("Belém, 21 de novembro de 2025; 204º da Independência..." e assinaturas)
                     clausula = re.split(r"\s[A-ZÀ-Ú][\w\s-]{1,40}, (?:em )?\d{1,2}º? de \w+ de \d{4}[;.]", txt)[0]
-                    art = a
+                    art, bl_clausula = a, bl
                     break
             if not clausula:
                 continue
-            item = {"norma": _nome_da_epigrafe(alt.epigrafe) or url.rsplit("/", 1)[-1],
+            pub = data_de_publicacao(alt.epigrafe)
+            nome = _nome_da_epigrafe(alt.epigrafe) or url.rsplit("/", 1)[-1]
+            dispositivos = [d for ds in por_art.values() for d in ds]
+            item = {"norma": nome, "ementa": alt.ementa or None,
                     "artigo": rotulo_dispositivo((("art", art),)), "dispositivos": dispositivos[:8],
                     "clausula": clausula[:1500], "url": alt.url}
-            d = data_efeitos(clausula, data_de_publicacao(alt.epigrafe))
-            if d and d > hoje():
-                item["data_futura"] = d.isoformat()
+            efeitos = []
+            for art_alt, ds in por_art.items():
+                regra = _regra_de_efeitos(bl_clausula, art_alt, alt) if art_alt else None
+                if regra:
+                    d = data_efeitos(regra, pub)
+                    if d:
+                        efeitos.append({"artigo_alterador": rotulo_dispositivo((("art", art_alt),)),
+                                        "dispositivos": ds[:8], "data": d.isoformat(), "regra": regra[:500],
+                                        # só "entra em vigor na publicação": o dispositivo pode ter termo próprio
+                                        "so_vigencia": not re.search(r"efeito|a partir|apos|decorrid", normalizar(regra))})
+            if efeitos:
+                item["efeitos_no_trecho_lido"] = efeitos
+                futuras = [e["data"] for e in efeitos if e["data"] > hoje().isoformat()]
+                if futuras:
+                    item["data_futura"] = min(futuras)
+            else:
+                d = data_efeitos(clausula, pub)
+                if d and d > hoje():
+                    item["data_futura"] = d.isoformat()
             out.append(item)
         return out
 
