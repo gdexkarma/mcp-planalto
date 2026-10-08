@@ -132,7 +132,9 @@ async def ler_norma(
 ) -> str:
     """Lê o texto atualizado (compilado) de uma norma federal direto do Planalto, inteiro ou por dispositivo.
 
-    Também aceita o dispositivo na própria referência: "art. 74, § 12 da Lei 9.430/96".
+    Também aceita o dispositivo na própria referência: "art. 74, § 12 da Lei 9.430/96". Ao ler um dispositivo,
+    traz as notas de vigência do cabeçalho da norma e um ALERTA quando o Senado registra alteração recente do
+    dispositivo que o texto ainda não mostra.
     """
     s = await _servico()
     r = await _rodar(s.texto, referencia, dispositivo=dispositivo, termo=termo, modo=modo,
@@ -147,7 +149,11 @@ async def ler_norma(
         cab.append(f"Situação: {r['situacao']}")
     cab.append(f"Fonte: {r['url']}" + (f" (página atualizada no Planalto em {r['planalto_atualizado_em']})"
                                        if r.get("planalto_atualizado_em") else ""))
-    for k, rot in (("observacao_numeracao", "Numeração"), ("notas_gerais", "Notas"), ("anexos", "Anexos")):
+    if r.get("alerta"):
+        cab.append(f"ALERTA: {r['alerta']}")
+    for k, rot in (("observacao_numeracao", "Numeração"), ("notas_gerais", "Notas"),
+                   ("notas_de_vigencia_da_norma", "Notas de vigência da norma (valem para todo o texto)"),
+                   ("anexos", "Anexos")):
         if r.get(k):
             v = r[k]
             cab.append(f"{rot}: " + (" · ".join(v) if isinstance(v, list) else v))
@@ -223,9 +229,10 @@ async def verificar_atualizacao(referencia: Referencia) -> dict:
     """Confere se o texto compilado do Planalto já incorpora as alterações conhecidas.
 
     Para cada norma alteradora registrada pelo Senado, procura a nota "(Redação dada/Incluído/Revogado pela …)"
-    no próprio dispositivo alterado. Separa: não refletidas (ATENÇÃO), a conferir (só no cabeçalho, possível
-    vigência futura), antigas sem nota (informativo) e MPs antigas. Use antes de afirmar que uma redação está
-    atualizada.
+    em cada artigo alterado (acréscimos: o dispositivo existe e não foi incluído por outra norma). Também procura
+    leis dos últimos ~13 meses cuja ementa diz alterar a norma. Separa: não refletidas (ATENÇÃO), a conferir (só
+    em "Vide", incorporação parcial ou vigência futura), antigas sem nota (informativo) e MPs encerradas. Use
+    antes de afirmar que uma redação está atualizada.
     """
     s = await _servico()
     return await _rodar(s.verificar_atualizacao, referencia)

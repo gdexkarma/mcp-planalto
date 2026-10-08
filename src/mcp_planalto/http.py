@@ -63,6 +63,15 @@ def decodificar(corpo: bytes, content_type: str = "", forcar: str | None = None)
         return corpo.decode(forcar, "replace")
     if corpo.startswith(b"\xef\xbb\xbf"):
         return corpo[3:].decode("utf-8", "replace")
+    # Algumas páginas do Planalto (ex.: l11340.htm) vêm em UTF-16 com BOM e, às vezes, com um
+    # byte a mais no fim.
+    if corpo.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return corpo[:len(corpo) // 2 * 2].decode("utf-16", "replace")
+    amostra = corpo[:4000]
+    if amostra and amostra.count(b"\x00") > len(amostra) // 4:  # UTF-16 sem BOM
+        par = corpo[:len(corpo) // 2 * 2]
+        le = amostra[1::2].count(b"\x00") > amostra[0::2].count(b"\x00")
+        return par.decode("utf-16-le" if le else "utf-16-be", "replace")
     ct = content_type.lower()
     if "charset=" in ct:
         cs = ct.split("charset=")[-1].split(";")[0].strip().strip('"')

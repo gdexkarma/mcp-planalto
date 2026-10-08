@@ -496,6 +496,7 @@ def _casa_art(s: str):
     return m
 
 
+_RE_NOTA_INCLUSAO = re.compile(r"\((?:Inclu[íi]d|Acrescid)[oa]s?\s+pel", re.I)
 _ASPAS_ABRE = ("“", '"', "‘", "'", "«", "”")
 
 
@@ -509,7 +510,7 @@ def _fecha_citacao(t: str) -> bool:
     if fim.endswith(("”", "»", "’")):
         return True
     if fim.endswith('"'):
-        return t.count('"') % 2 == 1 or t.lstrip().startswith(("“", "”"))
+        return t.count('"') % 2 == 1 or t.lstrip().startswith(("“", "”", '"'))
     return False
 
 
@@ -593,8 +594,10 @@ def _rotular(blocos: list[Bloco]) -> None:
         if em_citacao or abre:
             if em_citacao and m and not base.startswith(_ASPAS_ABRE) and \
                     proximo_esperado(m.group("num").replace(".", "")) and \
-                    int(m.group("num").replace(".", "")) == _ordem(art)[0] + 1:
-                em_citacao = False  # aspas não fechadas e começou o próximo artigo
+                    (int(m.group("num").replace(".", "")) == _ordem(art)[0] + 1 or
+                     _RE_NOTA_INCLUSAO.search(base)):
+                # aspas não fechadas e começou o próximo artigo (ou um "Art. 3º-A" incluído depois)
+                em_citacao = False
             else:
                 b.tipo = "citacao"
                 b.artigo, b.espaco = art, espaco
@@ -724,6 +727,10 @@ def _ajustar_estrutura(blocos: list[Bloco]) -> None:
                     break
             continue
         if b.tipo != "texto" or not b.vigente or len(b.vigente) > 120 or re.search(r"[.;:,]$", b.vigente):
+            continue
+        # rubrica ("Satisfação de lascívia...") não termina em pontuação nem antes da nota; "Pena - ... multa.
+        # (Redação dada...)" é o preceito secundário do artigo anterior
+        if re.search(r"[;:,]$", _espacos(_RE_NOTA.sub(" ", b.vigente))) or re.match(r"Pena\s*[-–—:]", b.vigente):
             continue
         # tratados: "Artigo 26" / "Pacta sunt servanda" / texto -> o título é do artigo que acabou de abrir
         ant = next((x for x in reversed(blocos[:i]) if x.vigente and not x.obsoleto), None)

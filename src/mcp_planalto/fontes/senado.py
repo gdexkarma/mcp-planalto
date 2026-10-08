@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 
 BASE = "https://legis.senado.leg.br/dadosabertos/legislacao"
 ID_CF = "579494"  # código da Constituição de 1988 na base do Senado (a URL CON/1988/1988 não funciona)
+ID_ADCT = "604119"  # o ADCT é um documento separado
 
 # Sigla do Senado (antes do hífen) -> tipo interno
 _TIPO_SENADO = {
@@ -99,7 +100,7 @@ def _situacao(vides: list[etree._Element]) -> str | None:
             rotulo = f"Revogada ({nome})"
         elif "conversão em lei" in dec:
             rotulo = f"Convertida em lei ({nome})"
-        elif ("perda de eficácia" in dec and "no todo" in dec) or "caducidade" in dec or "rejeição" in dec:
+        elif ("perda de eficácia" in dec and "parcial" not in dec) or "caducidade" in dec or "rejeição" in dec:
             rotulo = f"Sem eficácia ({nome})" if nome else "Sem eficácia"
         elif "vigência encerrada" in dec:
             rotulo = f"Vigência encerrada ({nome})" if nome else "Vigência encerrada"
@@ -112,6 +113,58 @@ def _situacao(vides: list[etree._Element]) -> str | None:
         data, rotulo = max(provisorias)
         return rotulo.replace("Revogada (", "Revogação provisória por MP, conferir se a MP foi convertida (")
     return None
+
+
+_RE_DECL_FORTE = re.compile(r"revoga|efic[áa]cia|convers|vig[êe]ncia|caduc|rejei|revig|repristin", re.I)
+
+
+def _sem_vides_vazias_duplicadas(vides: list[etree._Element]) -> list[etree._Element]:
+    """O Senado às vezes repete a relação com a mesma norma posterior: uma vide com itens (ex.: só
+    "Ressalva") e outra genérica, sem itens ("Declaração de Alteração Permanente"). A genérica faria
+    a ressalva parecer alteração; descarta-a quando a mesma norma tem outra vide com itens."""
+    com_itens = {_txt(v, "codnormaposterior") or _txt(v, "nomeNormaPosterior")
+                 for v in vides if v.findall("itens/item")}
+    return [v for v in vides
+            if v.findall("itens/item")
+            or (_txt(v, "codnormaposterior") or _txt(v, "nomeNormaPosterior")) not in com_itens
+            or _RE_DECL_FORTE.search(_txt(v, "comentario"))]
+
+
+def _itens_vide(v) -> list[tuple[str, str]]:
+    its = [(_txt(i, "comentario"), _txt(i, "dispositivo")) for i in v.findall("itens/item")]
+    return its or [("", "")]
+
+
+def _relacoes_de_vides(vides, destino: str, destino_id: str | None, data_destino: str | None,
+                       prefixo: str = "") -> list[Relacao]:
+    out = []
+    for v in vides:
+        origem = ref_de_nome(_txt(v, "nomeNormaPosterior"))
+        if not origem:
+            continue
+        data_o = _data_br(_txt(v, "datAssinatura"))
+        if data_o and data_destino and data_o < data_destino and "revig" not in _txt(v, "comentario").lower():
+            data_o = None  # erro de cadastro do Senado (ex.: "Decreto 7.212 de 08/03/1879")
+        if data_o:
+            origem = origem.com_ano(int(data_o[:4]))
+        for acao, disp in _itens_vide(v):
+            if prefixo:
+                disp = f"{prefixo}, {disp}" if disp else prefixo
+            out.append(Relacao(
+                origem=origem.chave, destino=destino, declaracao=_txt(v, "comentario"), acao=acao,
+                dispositivo=disp, data=data_o, origem_senado_id=_txt(v, "codnormaposterior") or None,
+                destino_senado_id=destino_id,
+            ))
+    return out
+
+
+def ler_vides_adct(xml: bytes, destino: str) -> list[Relacao]:
+    """Vides do documento do ADCT no Senado, como relações recebidas pela CF ("ADCT, Art. 76")."""
+    d = etree.fromstring(xml).find(".//documento")
+    if d is None:
+        return []
+    return _relacoes_de_vides(_sem_vides_vazias_duplicadas(d.findall("vides/vide")), destino, ID_CF,
+                              "1988-10-05", prefixo="ADCT")
 
 
 def ler_detalhe(xml: bytes, numero: str | None = None) -> DetalheSenado | None:
@@ -140,7 +193,7 @@ def ler_detalhe(xml: bytes, numero: str | None = None) -> DetalheSenado | None:
     # "LEI-9430-1996-12-27 , Lei do Ajuste Tributário (1996)" -> "Lei do Ajuste Tributário (1996)"
     apelido = ", ".join(p.strip() for p in apelido.split(",")[1:]).strip() or None
     pubs = [_txt(p, "dispositivo") for p in d.findall("publicacoes/publicacao")]
-    vides = d.findall("vides/vide")
+    vides = _sem_vides_vazias_duplicadas(d.findall("vides/vide"))
     urn = None
     if m := re.search(r"urn=([^&\s]+)", _txt(ident, "urlDocumento")):
         urn = m.group(1)
@@ -153,23 +206,7 @@ def ler_detalhe(xml: bytes, numero: str | None = None) -> DetalheSenado | None:
     )
     det = DetalheSenado(norma)
 
-    def _itens(v) -> list[tuple[str, str]]:
-        its = [(_txt(i, "comentario"), _txt(i, "dispositivo")) for i in v.findall("itens/item")]
-        return its or [("", "")]
-
-    for v in vides:
-        origem = ref_de_nome(_txt(v, "nomeNormaPosterior"))
-        if not origem:
-            continue
-        data_o = _data_br(_txt(v, "datAssinatura"))
-        if data_o:
-            origem = origem.com_ano(int(data_o[:4]))
-        for acao, disp in _itens(v):
-            det.relacoes_recebidas.append(Relacao(
-                origem=origem.chave, destino=ref.chave, declaracao=_txt(v, "comentario"), acao=acao,
-                dispositivo=disp, data=data_o, origem_senado_id=_txt(v, "codnormaposterior") or None,
-                destino_senado_id=norma.senado_id,
-            ))
+    det.relacoes_recebidas = _relacoes_de_vides(vides, ref.chave, norma.senado_id, data)
     for v in d.findall("edivs/ediv"):
         destino = ref_de_nome(_txt(v, "nomeNormaAnterior"))
         if not destino:
@@ -178,7 +215,7 @@ def ler_detalhe(xml: bytes, numero: str | None = None) -> DetalheSenado | None:
         if data_d:
             destino = destino.com_ano(int(data_d[:4]))
         adct = _txt(v, "nomeNormaAnterior").lower().startswith("ato das disp")
-        for acao, disp in _itens(v):
+        for acao, disp in _itens_vide(v):
             if adct:
                 disp = f"ADCT, {disp}" if disp else "ADCT"
             det.relacoes_feitas.append(Relacao(
@@ -228,7 +265,18 @@ class Senado:
 
     def detalhe(self, ref: Referencia, max_idade: float | None = 24 * 3600) -> DetalheSenado | None:
         if ref.tipo == "CF":
-            return self.detalhe_por_id(ID_CF, max_idade)
+            det = self.detalhe_por_id(ID_CF, max_idade)
+            if det:
+                # o ADCT é um documento à parte no Senado; suas alterações entram como "ADCT, Art. N"
+                try:
+                    xml = self._get(f"{BASE}/{ID_ADCT}", max_idade)
+                    if xml and b"<documento" in xml:
+                        det.relacoes_recebidas += ler_vides_adct(xml, det.norma.chave)
+                except ErroHTTP as e:
+                    log.warning("ADCT indisponível no Senado: %s", e)
+                    det.norma.observacao = ((det.norma.observacao or "") +
+                                            " [Alterações do ADCT indisponíveis nesta consulta.]").strip()
+            return det
         if not ref.ano:
             raise ValueError("O Senado exige o ano da norma.")
         # MPs reeditadas: a API só aceita o número-base e devolve todas as edições do ano

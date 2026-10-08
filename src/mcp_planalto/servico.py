@@ -122,6 +122,10 @@ def classificar_relacao(r: Relacao) -> str:
         return "correlata"
     if a.startswith(("ressalva", "com novo tratamento")) or "novo tratamento" in d:
         return "ressalva"
+    if "conversao" in d and not a:
+        return "conversao"
+    if "reedicao" in d and not a:
+        return "reedicao"  # "Reedição com/sem Alteração" de MP  # "Conversão em Lei com Alteração": a MP virou lei, não foi alterada
     if "revogacao" in d and "no todo" in d:
         return "altera"
     if a.startswith(("alteracao", "acrescimo", "revogacao", "supressao", "renumeracao", "revigora",
@@ -220,6 +224,44 @@ def paginar(texto: str, max_caracteres: int, pagina: int) -> PaginaTexto:
     return PaginaTexto(paginas[pagina - 1], pagina, len(paginas))
 
 
+def _decl_forte(r: Relacao) -> bool:
+    """Declaração que atinge a norma inteira mesmo sem itens (revogação no todo, suspensão, perda de
+    eficácia, revigoração, conversão de MP)."""
+    d = normalizar(r.declaracao)
+    if any(x in d for x in ("eficacia", "caduc", "rejei", "conversao")):
+        return True
+    return "no todo" in d and any(x in d for x in ("revogacao", "suspensao", "revigoracao", "repristin"))
+
+
+def _limpar_relacoes(rels: list[Relacao], chave_outra) -> list[Relacao]:
+    """Descarta a relação genérica sem itens quando a mesma norma tem outra relação detalhada: o Senado
+    repete a vide ("Declaração de Alteração Permanente" vazia ao lado de uma só com "Ressalva")."""
+    detalhadas = {chave_outra(r) for r in rels if r.acao or r.dispositivo}
+    return [r for r in rels if r.acao or r.dispositivo or chave_outra(r) not in detalhadas or _decl_forte(r)]
+
+
+def _e_adct(dispositivo: str | None) -> bool:
+    n = normalizar(dispositivo or "")
+    return "adct" in n or "disposicoes constitucionais transitorias" in n
+
+
+_RE_INCLUIDO = re.compile(r"\((?:Inclu[íi]d|Acrescid|Acrescentad)[oa]s?\s+pel[oa]s?\s+([^()]{3,120})\)", re.I)
+
+
+_RE_VIDE = re.compile(r"\(\s*Vide\b[^()]*(?:\([^()]*\)[^()]*)*\)\s*(?:Vig[êe]ncia|Produ[çc][ãa]o de efeitos?)?", re.I)
+
+
+def _cita_incorporada(texto: str, ref: Referencia) -> bool:
+    """O texto cita `ref` fora de "(Vide Lei X) Vigência": a remissão só avisa de mudança futura."""
+    return cita_norma(_RE_VIDE.sub(" ", texto), ref)
+
+
+def _incluido_por_outra(blocos, ref: Referencia) -> bool:
+    """O dispositivo traz "(Incluído pela Lei X)" e X não é `ref`: é homônimo de outro acréscimo."""
+    notas = [m.group(1) for b in blocos[:1] for m in _RE_INCLUIDO.finditer(b.completo)]
+    return bool(notas) and not any(cita_norma(n, ref) for n in notas)
+
+
 def _familia(chave: str) -> str:
     """MPs reeditadas (pré-2001) contam como uma só: "MPV:1537-41:1997" -> "MPV:1537"."""
     if chave.startswith("MPV:") and re.match(r"MPV:\d+-\d+:", chave):
@@ -236,6 +278,7 @@ class Legislacao:
         self.senado = Senado(self.http)
         self._docs: collections.OrderedDict[str, tuple[float, Documento]] = collections.OrderedDict()
         self._detalhes: collections.OrderedDict[str, tuple[float, DetalheSenado]] = collections.OrderedDict()
+        self._fundo = ThreadPoolExecutor(max_workers=2, thread_name_prefix="senado")
         self._lock = threading.Lock()
         self._sync_lock = threading.Lock()
         self.sincronizando = Atividade()
@@ -365,7 +408,8 @@ class Legislacao:
         rec, fei = self.db.relacoes(destino=chave), self.db.relacoes(origem=chave)
         if not n or not (rec or fei or n.detalhe_em):
             return None
-        return DetalheSenado(n, rec, fei, [])
+        return DetalheSenado(n, _limpar_relacoes(rec, lambda r: r.origem),
+                             _limpar_relacoes(fei, lambda r: r.destino), [])
 
     def _gravar_detalhe(self, det: DetalheSenado, guardar: bool = True) -> None:
         det.norma.detalhe_em = agora()
@@ -451,6 +495,13 @@ class Legislacao:
         if doc.tudo_riscado() and modo == "vigente":
             cab["aviso"] = ("Todo o texto desta norma está riscado no Planalto (revogada ou sem eficácia). "
                             "Use modo='historico' para ler o texto original.")
+            if "situacao" not in cab:
+                try:
+                    det, _ = self.obter_detalhe(norma)
+                    if det and det.norma.situacao:
+                        cab["situacao"] = det.norma.situacao
+                except Exception as e:  # a situação é complemento; o aviso já basta
+                    log.info("Situação de %s indisponível: %s", norma.nome, e)
             return cab
         blocos = None
         if dispositivo:
@@ -470,6 +521,20 @@ class Legislacao:
                 return cab
         if blocos is None and doc.notas_gerais:
             cab["notas_gerais"] = doc.notas_gerais
+        elif dispositivo and doc.notas_gerais:
+            # "(Vide Lei X) Vigência", "produção de efeitos": valem também para o dispositivo lido
+            ano_min = hoje().year - 2
+            vig = [n for n in doc.notas_gerais
+                   if re.search(r"vig[êe]ncia|efeitos|vigorar", n, re.I)
+                   or any(int(a) >= ano_min for a in re.findall(r"\b(?:19|20)\d\d\b", n))]
+            if vig:
+                cab["notas_de_vigencia_da_norma"] = vig[:12]
+        if dispositivo and blocos:
+            pend = self._alteracoes_nao_refletidas(norma, dispositivo, blocos)
+            if pend:
+                cab["alerta"] = ("O Senado registra alterações recentes deste dispositivo que não aparecem nas notas "
+                                 "do texto do Planalto (vigência futura ou compilado desatualizado): "
+                                 + "; ".join(pend) + ". Confira no DOU ou com verificar_atualizacao.")
         corpo = doc.renderizar(blocos, modo=modo, notas=notas, omitir_revogados=omitir_revogados)
         if not corpo:
             cab["aviso"] = ("O trecho pedido só existe em redação anterior (está riscado no Planalto). "
@@ -482,6 +547,43 @@ class Legislacao:
         if modo == "historico":
             cab["legenda"] = "Trechos entre ~~ ~~ são redações anteriores (riscadas no Planalto)."
         return cab
+
+    def _alteracoes_nao_refletidas(self, norma: Norma, dispositivo: str, blocos: list) -> list[str]:
+        """Alterações dos últimos 2 anos registradas pelo Senado para o dispositivo e não citadas nos blocos."""
+        alvo = chave_dispositivo(dispositivo)
+        if not alvo:
+            return []
+        # complemento da leitura: não pode atrasá-la. Espera até 10 s; a consulta segue em segundo plano
+        # e fica em cache para a próxima leitura.
+        futuro = self._fundo.submit(self.obter_detalhe, norma)
+        try:
+            det, _ = futuro.result(timeout=10)
+        except Exception as e:  # sem Senado (ou lento), segue só com o texto
+            log.info("Senado indisponível para o alerta de %s: %s", norma.nome, e)
+            return []
+        if not det:
+            return []
+        adct = norma.tipo == "CF" and _e_adct(dispositivo)
+        limite = (hoje() - dt.timedelta(days=730)).isoformat()
+        texto = " ".join(b.completo for b in blocos)
+        vistas, out = set(), []
+        for r in det.relacoes_recebidas:
+            if (r.data or "") < limite or not r.dispositivo or not _acao_altera_texto(r):
+                continue
+            if r.origem.startswith("DEC:") and norma.tipo != "DEC":
+                continue
+            if norma.tipo == "CF" and (not r.origem.startswith("EMC:") or _e_adct(r.dispositivo) != adct):
+                continue
+            if not dispositivo_casa(alvo, chave_dispositivo(r.dispositivo)):
+                continue
+            ref = Referencia.de_chave(r.origem)
+            if r.origem in vistas or cita_norma(texto, ref):
+                continue
+            if ref.tipo == "MPV" and self._mp_encerrada(r.origem):
+                continue
+            vistas.add(r.origem)
+            out.append(f"{ref.nome} ({r.acao or 'alteração'}: {r.dispositivo})")
+        return out[:8]
 
     # ================================================================ ficha
     def ficha(self, referencia: str) -> dict:
@@ -502,6 +604,8 @@ class Legislacao:
             rec = [r for r in det.relacoes_recebidas if _acao_altera_texto(r)]
             if norma.tipo == "CF":
                 rec = [r for r in rec if r.origem.startswith("EMC:")]
+            elif norma.tipo != "DEC":
+                rec = [r for r in rec if not r.origem.startswith("DEC:")]  # decreto não altera lei
             out["alterada_por"] = len({_familia(r.origem) for r in rec})
             out["ultima_alteracao"] = max((r.data for r in rec if r.data), default=None)
             regs = {}
@@ -511,6 +615,14 @@ class Legislacao:
             out["regulamentada_por"] = sorted(self._nome(c) for c in regs.values())
             out["normas_que_esta_altera"] = len({r.destino for r in det.relacoes_feitas
                                                  if classificar_relacao(r) == "altera"})
+        if norma.tipo == "MPV" and "tramit" in normalizar(norma.situacao or ""):
+            if (norma.data or "9999") < "2001-09-12":
+                out["situacao"] = ("Em vigor por força do art. 2º da EC 32/2001 (MP anterior à emenda: vale até "
+                                   "ser convertida, rejeitada ou revogada)")
+            elif norma.data and norma.data < (hoje() - dt.timedelta(days=130)).isoformat():
+                out["aviso_situacao"] = ("O cadastro diz 'em tramitação', mas o prazo constitucional da MP (até 120 "
+                                         "dias, fora o recesso) já passou: provavelmente perdeu a eficácia ou foi "
+                                         "convertida. Confira no Congresso.")
         if aviso:
             out["aviso"] = aviso
         return out
@@ -538,6 +650,7 @@ class Legislacao:
         alvo = chave_dispositivo(dispositivo) if dispositivo else ()
         if dispositivo and not alvo:
             return {"norma": norma.nome, "aviso": f"Não entendi o dispositivo '{dispositivo}'. Ex.: 'art. 74, § 12'."}
+        alvo_adct = norma.tipo == "CF" and _e_adct(dispositivo)
         grupos: dict[str, dict] = {}
         for r in rels:
             classe = classificar_relacao(r)
@@ -545,37 +658,71 @@ class Legislacao:
                 continue
             if desde and (r.data or "") < desde:
                 continue
-            norma_inteira = not r.dispositivo.strip()
-            if alvo and not norma_inteira:
-                if not dispositivo_casa(alvo, chave_dispositivo(r.dispositivo)):
-                    continue
+            disp_r = r.dispositivo.strip()
+            norma_inteira = not disp_r or (_e_adct(disp_r) and not chave_dispositivo(disp_r))
+            if alvo:
+                if norma_inteira:
+                    # sem itens, só interessa ao dispositivo o que atinge a norma toda (revogação no todo,
+                    # perda de eficácia...); "Declaração de Alteração" genérica não diz o que mudou
+                    if not _decl_forte(r):
+                        continue
+                else:
+                    if norma.tipo == "CF" and _e_adct(disp_r) != alvo_adct:
+                        continue
+                    if not dispositivo_casa(alvo, chave_dispositivo(disp_r)):
+                        continue
             outra = r.origem if direcao == "recebidas" else r.destino
-            g = grupos.setdefault(outra, {
+            chave_g = _familia(outra)  # reedições de MP (pré-2001) num grupo só
+            g = grupos.setdefault(chave_g, {
                 "norma": self._nome(outra), "chave": outra, "data": r.data, "declaracao": r.declaracao,
-                "dispositivos": [],
+                "dispositivos": [], "_classes": set(), "_edicoes": set(),
             })
+            g["_classes"].add(classe)
+            g["_edicoes"].add(outra)
+            if (r.data or "") > (g["data"] or ""):
+                g.update(norma=self._nome(outra), chave=outra, data=r.data)
             if norma_inteira:
                 item = f"{r.acao or r.declaracao} (norma inteira)"
             else:
-                item = f"{r.acao}: {r.dispositivo}".strip(": ")
+                item = f"{r.acao}: {disp_r}".strip(": ")
             if item and item not in g["dispositivos"]:
                 g["dispositivos"].append(item)
-        lista = sorted(grupos.values(), key=lambda g: (g["data"] or "", g["norma"]), reverse=True)
-        for g in lista:
+        alteracoes, outras = [], []
+        for g in grupos.values():
+            classes, edicoes = g.pop("_classes"), g.pop("_edicoes")
+            if len(edicoes) > 1:
+                g["reedicoes"] = len(edicoes)
+                g["norma"] += f" (última de {len(edicoes)} edições da MP)"
+            g["dispositivos"] = g["dispositivos"][:30]
+            if classes & {"altera"} or (direcao == "feitas" and not classes - {"altera", "outra"}):
+                alteracoes.append(g)
+            else:
+                g["tipo"] = ", ".join(sorted(classes))
+                outras.append(g)
+        ordem = lambda g: (g["data"] or "", g["norma"])  # noqa: E731
+        alteracoes.sort(key=ordem, reverse=True)
+        outras.sort(key=ordem, reverse=True)
+        for g in alteracoes + outras:
             n = self.db.obter(g["chave"])
             if n and n.ementa:
                 g["ementa"] = n.ementa
+        rotulo = rotulo_dispositivo(alvo) + (" do ADCT" if alvo_adct else "") if alvo else None
         out = {
             "norma": norma.nome,
             "direcao": "normas que alteraram esta" if direcao == "recebidas" else "normas alteradas por esta",
-            "dispositivo": rotulo_dispositivo(alvo) if alvo else None,
-            "total": len(lista),
-            "alteracoes": lista,
+            "dispositivo": rotulo,
+            "total": len(alteracoes),
+            "alteracoes": alteracoes,
             "fonte": "Senado Federal - Dados Abertos (vides)",
         }
+        if outras:
+            out["outras_relacoes"] = outras
+            out["nota_outras"] = ("Ressalvas, regulamentações, novo tratamento da matéria e conversões/reedições "
+                                  "de MP: não mudam a redação do dispositivo, mas podem afetar sua aplicação.")
         if alvo:
-            out["observacao"] = ("Inclui alterações do próprio dispositivo, dos que ele contém, dos que o contêm "
-                                 "(registros do Senado no nível do artigo) e da norma inteira.")
+            out["observacao"] = ("Inclui alterações do próprio dispositivo, dos que ele contém e dos que o contêm "
+                                 "(o Senado às vezes registra só o artigo), além de revogação ou perda de eficácia "
+                                 "da norma inteira. Confira as notas do texto (ler_norma) para o detalhe.")
         if aviso:
             out["aviso"] = aviso
         return out
@@ -613,24 +760,36 @@ class Legislacao:
                     "dispositivos": sorted({f"{r.acao}: {r.dispositivo}".strip(": ") for r in rels})[:15]}
             pad_arq = _padrao_arquivo(ref)
             citada_doc = bool(pad_arq and any(pad_arq.match(a) for a in doc.arquivos_citados)) or cita_norma(texto_doc, ref)
-            estado = self._estado_no_texto(doc, ref, rels, citada_doc)
+            estado, faltam = self._estado_no_texto(doc, ref, rels, citada_doc, adct=norma.tipo == "CF")
             if estado == "refletida":
                 continue
             provisoria = ref.tipo == "MPV" and all("provis" in normalizar(r.declaracao) for r in rels)
-            if provisoria and data and data < limite_mp:
+            fim_mp = self._mp_encerrada(chave) if ref.tipo == "MPV" else None
+            if provisoria and ((data and data < limite_mp) or fim_mp):
+                if fim_mp:
+                    item["situacao_mp"] = fim_mp
                 mps_antigas.append(item)  # caducou (texto voltou) ou foi convertida (a lei é que aparece)
             elif (data or "") < limite_recente:
                 # alteração antiga sem nota no texto: em geral remissão registrada pelo Senado como alteração,
                 # artigo vetado, ou nota omitida pelo Planalto - não indica compilado desatualizado
                 antigas.append(item)
+            elif estado == "parcial":
+                item["motivo"] = ("O texto cita esta norma em parte dos artigos alterados, mas não em: "
+                                  + "; ".join(faltam[:10]) + ". Pode ser incorporação parcial, vigência "
+                                  "escalonada ou registro impreciso do Senado.")
+                a_conferir.append(item)
             elif estado == "so_no_cabecalho":
                 item["motivo"] = ("A norma só aparece em 'Vide'/notas gerais, não nos artigos alterados: "
                                   "alteração com vigência futura ou ainda não incorporada.")
+                if faltam:
+                    item["artigos_sem_nota"] = faltam[:10]
                 a_conferir.append(item)
             else:
                 pendentes.append(item)
         conhecidas = {_familia(c) for c in por_norma}
-        recentes = self._recentes_que_alteram(norma, doc, texto_doc, {r.origem for r in det.relacoes_recebidas})
+        recentes, recentes_cabecalho = self._recentes_que_alteram(norma, doc, texto_doc,
+                                                                 {r.origem for r in det.relacoes_recebidas})
+        a_conferir += recentes_cabecalho
         res["alteracoes_conhecidas"] = len(conhecidas)
         res["ultima_alteracao_conhecida"] = ultima
         res["nao_refletidas_no_texto"] = sorted(pendentes, key=lambda p: p["data"] or "", reverse=True)
@@ -642,15 +801,19 @@ class Legislacao:
                                    "remissões que o Senado registra como alteração, artigos vetados ou notas omitidas "
                                    "pelo Planalto; confira só se o dispositivo for relevante para o caso.")
         if mps_antigas:
-            res["mps_antigas_nao_citadas"] = mps_antigas
-            res["nota_mps"] = ("Alterações provisórias de MPs com mais de 180 dias não indicam desatualização: "
-                               "a MP caducou (e o texto voltou) ou foi convertida em lei (e a lei aparece no texto).")
+            mps_antigas.sort(key=lambda p: p["data"] or "", reverse=True)
+            res["mps_antigas_nao_citadas"] = len(mps_antigas)
+            res["mps_antigas_exemplos"] = mps_antigas[:10]
+            res["nota_mps"] = ("Alterações provisórias de MPs encerradas (ou com mais de 180 dias) não indicam "
+                               "desatualização: a MP caducou (e o texto voltou) ou foi convertida em lei (e a lei "
+                               "aparece no texto).")
         if pendentes or recentes:
             res["conclusao"] = ("ATENÇÃO: há normas que alteram esta e não aparecem no texto do Planalto. O compilado "
                                 "pode estar desatualizado nesses pontos; confira as normas listadas no DOU.")
         elif a_conferir:
-            res["conclusao"] = ("O texto cita todas as alteradoras, mas algumas só no cabeçalho: confira se a nova "
-                                "redação já está nos dispositivos (pode ser vigência futura).")
+            res["conclusao"] = ("A CONFERIR: há alterações que o texto só menciona em 'Vide' ou em parte dos "
+                                "dispositivos alterados (em geral vigência futura). Veja 'a_conferir' e confirme "
+                                "se a nova redação já vale para o seu caso.")
         else:
             res["conclusao"] = (f"O texto do Planalto reflete as alterações recentes conhecidas de {norma.nome} "
                                 f"({len(conhecidas)} normas alteradoras no total).")
@@ -660,39 +823,69 @@ class Legislacao:
                              "confirme no DOU antes de concluir.")
         return res
 
-    def _estado_no_texto(self, doc: Documento, ref: Referencia, rels: list[Relacao], citada_doc: bool) -> str:
-        """refletida | so_no_cabecalho | ausente"""
-        arts = []
+    def _mp_encerrada(self, chave: str) -> str | None:
+        """Situação da MP quando ela já não produz efeitos próprios (convertida, caducada, rejeitada)."""
+        n = self.db.obter(chave)
+        sit = normalizar(n.situacao or "") if n else ""
+        if any(x in sit for x in ("convert", "encerrad", "sem eficacia", "perda de eficacia", "rejeitad",
+                                  "caduc", "revogad")):
+            return n.situacao
+        return None
+
+    def _estado_no_texto(self, doc: Documento, ref: Referencia, rels: list[Relacao], citada_doc: bool,
+                         adct: bool = False) -> tuple[str, list[str]]:
+        """(refletida | parcial | so_no_cabecalho | ausente, artigos sem nota da alteradora).
+
+        Avalia artigo por artigo: o artigo reflete a alteração quando cita a alteradora numa nota, quando
+        o dispositivo acrescentado existe (e não foi incluído por outra norma) ou quando o revogado
+        aparece revogado."""
+        por_artigo: dict[str, list[tuple[tuple, str]]] = {}
         for r in rels:
             k = chave_dispositivo(r.dispositivo) if r.dispositivo else ()
-            if k:
-                arts.append((k, normalizar(r.acao)))
-        if not arts:
-            return "refletida" if citada_doc else "ausente"
-        algum_artigo_visto = False
-        for k, acao in arts:
-            bl = doc.selecionar(rotulo_dispositivo(k[:1]))
-            if not bl:
+            if not k:
                 continue
-            algum_artigo_visto = True
-            texto_art = " ".join(b.completo for b in bl)
-            if cita_norma(texto_art, ref):
-                return "refletida"
-            alvo = doc.selecionar(rotulo_dispositivo(k))
-            if acao.startswith("acrescimo") and alvo:
-                return "refletida"  # o dispositivo acrescentado existe
-            if acao.startswith("revogacao") and alvo and all(b.revogado or b.obsoleto for b in alvo
-                                                              if b.tipo == "dispositivo"):
-                return "refletida"
-        if not algum_artigo_visto:
-            return "refletida" if citada_doc else "ausente"
-        return "so_no_cabecalho" if citada_doc else "ausente"
+            sufixo = " do ADCT" if adct and _e_adct(r.dispositivo) else ""
+            por_artigo.setdefault(rotulo_dispositivo(k[:1]) + sufixo, []).append((k, normalizar(r.acao), sufixo))
+        if not por_artigo:
+            return ("refletida" if citada_doc else "ausente"), []
+        ok, faltam = 0, []
+        for rot_art, itens in por_artigo.items():
+            bl = doc.selecionar(rot_art)
+            if not bl:
+                continue  # artigo não localizado (numeração do Senado diferente): não decide
+            if _cita_incorporada(" ".join(b.completo for b in bl), ref):
+                ok += 1
+                continue
+            refletido = False
+            for k, acao, sufixo in itens:
+                alvo = doc.selecionar(rotulo_dispositivo(k) + sufixo)
+                if not alvo:
+                    continue
+                if acao.startswith("acrescimo") and not _incluido_por_outra(alvo, ref):
+                    refletido = True  # o dispositivo acrescentado existe
+                elif acao.startswith("revogacao") and all(b.revogado or b.obsoleto for b in alvo
+                                                          if b.tipo == "dispositivo"):
+                    refletido = True
+            if refletido:
+                ok += 1
+            else:
+                faltam.append(rot_art)
+        if not ok and not faltam:
+            return ("refletida" if citada_doc else "ausente"), []
+        if not faltam:
+            return "refletida", []
+        if ok:
+            return "parcial", faltam
+        return ("so_no_cabecalho" if citada_doc else "ausente"), faltam
 
-    def _recentes_que_alteram(self, norma: Norma, doc: Documento, texto_doc: str, ja_conhecidas: set[str]) -> list[dict]:
-        """Normas dos últimos 120 dias cuja ementa diz alterar/revogar esta e que o texto ainda não cita."""
-        desde = (hoje() - dt.timedelta(days=120)).isoformat()
+    def _recentes_que_alteram(self, norma: Norma, doc: Documento, texto_doc: str,
+                              ja_conhecidas: set[str]) -> tuple[list[dict], list[dict]]:
+        """Normas dos últimos ~13 meses (cobre vacatio de até 1 ano) cuja ementa diz alterar/revogar esta e
+        que o Senado ainda não registrou. Devolve (não citadas no texto, citadas só no cabeçalho)."""
+        desde = (hoje() - dt.timedelta(days=400)).isoformat()
         conhecidas = {_familia(c) for c in ja_conhecidas}
-        out = []
+        texto_artigos = None
+        ausentes, cabecalho = [], []
         for n in self.db.recentes(desde):
             if n.chave == norma.chave or not n.ementa or _familia(n.chave) in conhecidas:
                 continue
@@ -701,10 +894,21 @@ class Legislacao:
             if not _ementa_altera(n.ementa, norma.ref):
                 continue
             pad_arq = _padrao_arquivo(n.ref)
-            if (pad_arq and any(pad_arq.match(a) for a in doc.arquivos_citados)) or cita_norma(texto_doc, n.ref):
+            citada = (pad_arq and any(pad_arq.match(a) for a in doc.arquivos_citados)) or cita_norma(texto_doc, n.ref)
+            item = {"norma": n.nome, "data": n.data, "ementa": n.ementa}
+            if not citada:
+                if n.tipo == "MPV" and self._mp_encerrada(n.chave):
+                    continue
+                ausentes.append(item)
                 continue
-            out.append({"norma": n.nome, "data": n.data, "ementa": n.ementa})
-        return out
+            if texto_artigos is None:
+                texto_artigos = " ".join(b.completo for b in doc.blocos if b.tipo == "dispositivo")
+            if not _cita_incorporada(texto_artigos, n.ref):
+                item["motivo"] = ("A ementa diz alterar esta norma, mas o texto só a cita em 'Vide' (cabeçalho ou "
+                                  "remissão no artigo), não como redação dada/incluída: vigência futura ou alteração "
+                                  "ainda não incorporada.")
+                cabecalho.append(item)
+        return ausentes, cabecalho
 
     # ================================================================ busca
     def buscar(self, consulta: str, tipos: list[str] | None = None, ano_inicio: int | None = None,
@@ -1298,6 +1502,10 @@ def _ementa_orcamentaria(ementa: str | None) -> bool:
 def _ementa_altera(ementa: str, ref: Referencia) -> bool:
     """A ementa diz que altera/revoga a norma (e não só a cita, como "que regulamenta a Lei X")?"""
     e = normalizar(ementa)
+    # a finalidade ("para incluir ... do art. 121 do Código Penal") só cita a norma; vai até a próxima
+    # norma alterada (", e a Lei Y") ou o fim
+    e = re.sub(r"\b(?:para|a fim de|com o objetivo de)\b.*?(?=,?\s+e\s+(?:a|o|as|os)\s+(?:lei|decreto|medida|"
+               r"codigo|consolidacao|emenda)|;|$)", " ", e)
     for m in re.finditer(r"\b(altera|revoga|acrescenta|acresce|da nova redacao|modifica|inclui|prorroga)\w*\b", e):
         trecho = e[m.start(): m.start() + 600]
         trecho = re.split(r";|\be da outras\b", trecho)[0]

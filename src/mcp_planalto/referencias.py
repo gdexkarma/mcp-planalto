@@ -371,12 +371,19 @@ def chave_dispositivo(texto: str) -> tuple:
     n = normalizar(texto).replace("º", "").replace("°", "")
     n = re.sub(r"\[.*?\]", "", n)  # "[Lei nº 9.430 de 27/12/1996]" no Senado
     # sufixo de letra: "10-A", "359-M-A", "359-MA" ou colado ("22A"); nunca separado por espaço ("art. 1 do")
-    m = re.search(r"\bart(?:igo)?s?\.?\s*(\d{1,3}(?:\.\d{3})+|\d+)(?:\s*[º°])?"
-                  r"(?:\s*-\s*([a-z]{1,2}(?:\s*-\s*[a-z])?)\b|([a-z]{1,2})\b)?", n)
+    re_art = re.compile(r"\bart(?:igo)?s?\.?\s*(\d{1,3}(?:\.\d{3})+|\d+)(?:\s*[º°])?"
+                        r"(?:\s*-\s*([a-z]{1,2}(?:\s*-\s*[a-z])?)\b|([a-z]{1,2})\b)?")
+    m = re_art.search(n)
     if not m:
         return ()
+    prefixo = re.sub(r"\s+d[aoe]s?$", "", n[:m.start()].strip(" ,;"))
+    if prefixo and re.match(r"(?:§|paragrafo|par\.|inciso|inc\.|alinea|item|caput)", prefixo):
+        # ordem invertida: "inciso II do § 2º do art. 3" -> "art. 3, § 2º, inciso II"
+        partes_inv = [p.strip() for p in re.split(r"\s+d[aoe]s?\s+", prefixo) if p.strip()]
+        n = n[m.start():m.end()] + ", " + ", ".join(reversed(partes_inv)) + n[m.end():]
+        m = re_art.search(n)
     sufixo = re.sub(r"[\s-]", "", m.group(2) or m.group(3) or "")
-    if sufixo == "o":  # "art. 1o" = 1º
+    if m.group(3) == "o":  # "art. 1o" = 1º; "art. 19-O" é o artigo 19-O
         sufixo = ""
     partes: list[tuple[str, str]] = [("art", m.group(1).replace(".", "") + sufixo)]
     caput_final = False
