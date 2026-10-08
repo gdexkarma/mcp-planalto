@@ -54,19 +54,23 @@ _RE_LINKS_SOLTOS = re.compile(
 # "Art. 7º - O lucro" e "Art. 46 -A renda" NÃO têm sufixo (dash seguido de palavra).
 _SUFIXO = (r"(?:(?:(?<=[\dº°o])-|(?<=\d))(?P<suf>[A-Z]{1,2}(?:-[A-Z])?)(?![A-Za-zÀ-ÿ])(?!\s+[a-zà-ÿ]))?")
 _RE_ART = re.compile(
-    r"^(?:Art(?:igo)?|ART(?:IGO)?|A?rt(?=\.))\.{0,2}\s*(?P<num>\d{1,3}(?:\.\d{3})+|\d+)\s*(?:º|°|o(?=\W))?" + _SUFIXO
+    r"^(?:Art(?:igo)?|ART(?:IGO)?|A?rt(?=\.))(?:\s*\.){0,2}\s*(?P<num>\d{1,3}(?:\.\d{3})+|\d+)\s*(?:º|°|o(?=\W))?" + _SUFIXO
 )
 _RE_PAR = re.compile(r"^§\s*(?P<num>\d+)\s*(?:º|°|o(?=\W))?" + _SUFIXO)
 _RE_PU = re.compile(r"^Par[áa]grafo\s+[úu]nico", re.I)
 _RE_INC = re.compile(r"^([IVXLC]+)(?:\s*-\s*([A-Z])(?=\s*[-–—]))?\s*[-–—]")
-_RE_ALI = re.compile(r"^([a-z])(?:\s*-\s*([A-Z]))?\s*\)")
-_RE_ITEM = re.compile(r"^(\d{1,3})(?:\s*-\s*([A-Z]))?\s*[.)]\s")
+_RE_ALI = re.compile(r"^([a-z])(?:\s*-\s*([A-Z0-9]))?\s*\)")
+_RE_ITEM = re.compile(r"^(\d{1,3})(?:\s*-\s*([A-Z]))?\s*(?:[.)]|\s[-–—])\s")
 _RE_ESTRUTURA = re.compile(
-    r"^(LIVRO|PARTE|T[ÍI]TULO|CAP[ÍI]TULO|SE[ÇC][ÃA]O|SUBSE[ÇC][ÃA]O|ANEXO|ATO DAS DISPOSI[ÇC][ÕO]ES)(?![^\W\d_])", re.I
+    r"^(LIVRO|PARTE|T[ÍI]TULO|CAP[ÍI]TULO|SE[ÇC][ÃA]O|SUBSE[ÇC][ÃA]O|ANEXOS?|ATO DAS DISPOSI[ÇC][ÕO]ES|PROTOCOLO)"
+    r"(?![^\W\d_])", re.I
 )
-_RE_ANEXO = re.compile(r"^ANEXO(?![^\W\d_])(?:\s+(?:N[º°o]\.?\s*)?([IVXLC]+|\d+|[A-Z])(?![^\W\d_]))?", re.I)
+_RE_ANEXO = re.compile(
+    r"^(?:ANEXOS?(?![^\W\d_])(?:\s+(?:N[º°o]\.?\s*)?([IVXLC]+|\d+|[A-Z]|[ÚU]NICO)(?![^\W\d_]))?|"
+    r"(?:LISTA|TABELA|QUADRO|RELA[ÇC][ÃA]O|DEMONSTRATIVO)\b[^.]{0,120}?\bANEX[OA]S?\b|PROTOCOLO\b)", re.I)
 _RE_ADCT = re.compile(r"^ATO DAS DISPOSI[ÇC][ÕO]ES CONSTITUCIONAIS TRANSIT", re.I)
 _RE_PREAMBULO = re.compile(
+    r"^O\s+GENERAL[ÍI]SSIMO|^O\s+CHEFE\s+DO\s+GOVERNO\s+PROVIS|^D(OM|\.)\s+PEDRO|^A\s+PRINCEZA|"
     r"^(O|A)\s+(VICE[-–— ]\s?)?PRESIDENT[EA]\s+DA\s+REP[ÚU]BLICA|^O\s+CONGRESSO\s+NACIONAL|^As\s+Mesas\s+da\s+C[âa]mara|"
     r"^Fa[çc]o\s+saber|^O\s+PRESIDENTE\s+DO\s+SENADO|^N[óo]s,\s+representantes|^O\s+PRESIDENTE\s+DA\s+C[ÂA]MARA|"
     r"^OS\s+MINISTROS|^O\s+CHEFE\s+DO\s+GOVERNO|^O\s+PRESIDENTE\s+DOS\s+ESTADOS",
@@ -85,7 +89,8 @@ _BOILERPLATE = re.compile(
 # Linha de local e data da assinatura: depois dela vêm assinaturas e notas de rodapé.
 _RE_ASSINATURA = re.compile(
     r"^(Bras[íi]lia|Rio de Janeiro|Petr[óo]polis|Palácio do Planalto|Pal[áa]cio do Catete)\s*,?\s*(em\s+)?"
-    r"\d{1,2}[º°]?\s*(de\s+[a-zç]+|\.\d)",
+    r"\d{1,2}[º°]?\s*(de\s+[a-zç]+|\.\d)|^Sala das sess[õo]es do Governo|^Carta de Lei\b|"
+    r"^Pal[áa]cio do Rio de Janeiro",
     re.I,
 )
 _RE_INICIO_EMENTA = re.compile(
@@ -132,11 +137,12 @@ class Bloco:
         return t
 
     def crua(self) -> str:
-        return _espacos(self.completo.replace("~~", " "))
+        return _espacos(self.completo.replace("~~", ""))
 
     def rotulo_original(self) -> str:
-        m = re.match(r"^(Art\.?\s*[\d.]+\s*[º°o]?(?:-?[A-Z]{1,2}\b)?|§\s*\d+\s*[º°o]?(?:-[A-Z]{1,2}\b)?|"
-                     r"Par[áa]grafo\s+[úu]nico|[IVXLC]+(?:\s*-\s*[A-Z])?(?=\s*[-–—])|[a-z]\))", self.crua(), re.I)
+        m = re.match(r"^((?:Art|ART|Artigo)\.?\s*[\d.]*\d\s*[º°o]?(?:-[A-Z]{1,2}\b|[A-Z](?=[.\s]))?\.?|"
+                     r"§\s*\d+\s*[º°o]?(?:-[A-Z]{1,2}\b)?|[Pp]ar[áa]grafo\s+[úu]nico|PAR[ÁA]GRAFO\s+[ÚU]NICO|"
+                     r"[IVXLC]+(?:\s*-\s*[A-Z])?(?=\s*[-–—])|[a-z]\))", self.crua())
         if not m:
             return ""
         r = m.group(0).strip()
@@ -202,13 +208,16 @@ class Documento:
             elif re.search(r"\bregulamento\b", n):
                 esp = "reg"
             ma = re.search(r"\banexo\s*([ivxlc]+|\d+|unico|[a-z])?\b", n)
-            if ma and not re.search(r"\bart", n):
+            if ma:
                 alvo = (ma.group(1) or "").upper()
                 anexos = [e for e in self.espacos() if e.startswith("anexo:")]
-                if not alvo and len(anexos) == 1:
+                if (not alvo or alvo == "UNICO" or f"anexo:{alvo}" not in anexos) and len(anexos) == 1:
                     alvo = anexos[0].split(":", 1)[1]
-                escolhidos += [i for i, b in enumerate(self.blocos) if b.espaco == f"anexo:{alvo}"]
-                continue
+                if not re.search(r"\bart", n):
+                    escolhidos += [i for i, b in enumerate(self.blocos) if b.espaco == f"anexo:{alvo}"]
+                    continue
+                esp = f"anexo:{alvo}" if f"anexo:{alvo}" in anexos else esp  # "art. 1 do anexo II"
+                n = n[:ma.start()] + " " + n[ma.end():]
             n = re.sub(r"\b(do|da)?\s*(adct|regulamento|decreto(-lei)?)\b\s*,?", " ", n)
             # intervalo "arts. 15 a 20" (com milhar "1.052 a 1.054")
             m = re.search(r"arts?\.?\s*(\d{1,3}(?:\.\d{3})+|\d+)\s*(?:-\s*([a-z])\b)?[º°o]?\s*(?:a|ao|at[ée])\s+"
@@ -223,6 +232,8 @@ class Documento:
                 continue
             caput = bool(re.search(r"\bcaput\b", n))
             chave = chave_dispositivo(n if re.search(r"\bart", n) else "art. " + n)
+            if chave and chave[-1][0] == "caput":
+                chave, caput = chave[:-1], True
             if not chave:
                 continue
             art = chave[0][1]
@@ -498,6 +509,27 @@ def _fecha_citacao(t: str) -> bool:
     return False
 
 
+def _juntar_fragmentos(blocos: list[Bloco]) -> list[Bloco]:
+    """HTML mal aninhado parte um parágrafo no meio ("...o " <i>caput</i> " deste artigo"). Um bloco sem rótulo
+    que começa em minúscula, ou com aspa seguida de minúscula, continua o anterior quando este não termina
+    em pontuação final."""
+    out: list[Bloco] = []
+    for b in blocos:
+        t = b.crua()
+        if out and t and " | " not in t and not _inicio_dispositivo(t) and not _RE_ESTRUTURA.match(t):
+            ant = out[-1]
+            ta = ant.crua()
+            continua = re.match(r"^([a-zà-ÿ]|[\"'“”]\s*[a-zà-ÿ(]|[,;)])", t) and not re.match(r"^[a-z]\)", t)
+            if continua and ta and " | " not in ta and not re.search(r"[.;:!?]\s*$|\(NR\)\s*$", ta) and \
+                    not _RE_ESTRUTURA.match(ta) and not _RE_PREAMBULO.match(ta):
+                ant.vigente = _espacos(f"{ant.vigente} {b.vigente}")
+                ant.completo = _espacos(f"{ant.completo} {b.completo}")
+                ant.ancoras += b.ancoras
+                continue
+        out.append(b)
+    return out
+
+
 def _rotular(blocos: list[Bloco]) -> None:
     """Atribui espaço, artigo e dispositivo (art./§/inciso/alínea/item) a cada bloco."""
     art = par = inc = ali = None
@@ -506,6 +538,9 @@ def _rotular(blocos: list[Bloco]) -> None:
     alterador = False  # o artigo corrente introduz texto de outra norma
     rodape = False
     anexos_vistos = 0
+    anexo_atual = ""
+    anexos_com_artigos: list[str] = []
+    reg_de = ""  # anexo cujo articulado virou "reg"
 
     def proximo_esperado(num: str) -> bool:
         if not art:
@@ -513,10 +548,12 @@ def _rotular(blocos: list[Bloco]) -> None:
         a, _ = _ordem(art)
         return int(num) in (a, a + 1)
 
+    anterior = ""
     for i, b in enumerate(blocos):
         base = b.vigente or ""
         if not (_inicio_dispositivo(base) or _RE_ESTRUTURA.match(base)):
             base = b.crua()
+        texto_anterior, anterior = anterior, (base or anterior)
         # ---------------------------------------------------------- rodapé
         if _RE_ASSINATURA.match(base) and not em_citacao and art:
             rodape = True
@@ -531,6 +568,7 @@ def _rotular(blocos: list[Bloco]) -> None:
             if (titulo_reg or (_RE_ESTRUTURA.match(base) and not ma and not _RE_ADCT.match(base)) or
                     (m and m.group("num") == "1")) and _art1_adiante(blocos, i):
                 rodape, espaco, art = False, "reg", None
+                reg_de = anexo_atual or "I"
                 par = inc = ali = None
                 if titulo_reg:
                     b.tipo, b.espaco = "estrutura", espaco
@@ -540,7 +578,10 @@ def _rotular(blocos: list[Bloco]) -> None:
                 continue
             rodape = False
         # ---------------------------------------------------------- citação de outra norma
-        abre = base.startswith(_ASPAS_ABRE) or base.startswith(("......", "…"))
+        # Aspa só abre citação dentro de artigo que altera outra norma (ou depois de ":"); uma aspa solta
+        # num parágrafo comum não pode engolir o resto do artigo.
+        com_aspa = base.startswith(_ASPAS_ABRE) or base.startswith(("......", "…"))
+        abre = com_aspa and (alterador or texto_anterior.rstrip().endswith(":"))
         if not em_citacao and alterador and m and not abre:
             num = m.group("num").replace(".", "")
             if not proximo_esperado(num):
@@ -555,14 +596,23 @@ def _rotular(blocos: list[Bloco]) -> None:
                 b.artigo, b.espaco = art, espaco
                 em_citacao = not _fecha_citacao(base)
                 continue
+        if com_aspa:
+            base = base.lstrip("“\"‘'«” ")  # aspa solta antes do rótulo
+            m = _casa_art(base)
         # ---------------------------------------------------------- estrutura
-        if _RE_ESTRUTURA.match(base) and len(base) < 250 and not m:
+        if (_RE_ESTRUTURA.match(base) or ma) and len(base) < 250 and not m:
             b.tipo = "estrutura"
             if _RE_ADCT.match(base):
                 espaco, art = "adct", None
             elif ma:
                 anexos_vistos += 1
-                ident = (ma.group(1) or str(anexos_vistos) if anexos_vistos > 1 or ma.group(1) else "I").upper()
+                bruto = (ma.group(1) or "").upper().replace("Ú", "U")
+                if bruto == "UNICO":
+                    bruto = "I"
+                if re.match(r"PROTOCOLO", base, re.I):
+                    bruto = "PROTOCOLO"
+                ident = bruto or ("I" if anexos_vistos == 1 else str(anexos_vistos))
+                anexo_atual = ident
                 espaco, art = f"anexo:{ident}", None
             par = inc = ali = None
             alterador = False
@@ -572,7 +622,9 @@ def _rotular(blocos: list[Bloco]) -> None:
         if m:
             num = m.group("num").replace(".", "")
             if espaco.startswith("anexo:") and num == "1":
-                espaco = "reg"  # regulamento aprovado pelo decreto, publicado como anexo
+                anexos_com_artigos.append(anexo_atual)
+                if not reg_de:
+                    espaco, reg_de = "reg", anexo_atual  # regulamento aprovado pelo decreto, publicado como anexo
             art = num + (m.group("suf") or "").replace("-", "").lower()
             par = inc = ali = None
             b.chave = (("art", art),)
@@ -589,10 +641,11 @@ def _rotular(blocos: list[Bloco]) -> None:
             inc = str(romano_para_int(m.group(1))) + (m.group(2) or "").lower()
             ali = None
             b.chave = (("art", art),) + ((("par", par),) if par else ()) + (("inc", inc),)
-        elif (m := _RE_ALI.match(base)) and art and (inc or par):
+        elif (m := _RE_ALI.match(base)) and art:
+            # alínea logo abaixo do caput (sem inciso/§) também existe: LINDB art. 15, DL 3.365 art. 5º
             ali = m.group(1) + (m.group(2) or "").lower()
             b.chave = (("art", art),) + ((("par", par),) if par else ()) + ((("inc", inc),) if inc else ()) + (("ali", ali),)
-        elif (m := _RE_ITEM.match(base)) and art and (ali or inc):
+        elif (m := _RE_ITEM.match(base)) and art and (ali or inc or (not par and re.match(r"^\d{1,3}\s*[-–—]", base))):
             b.chave = (("art", art),) + ((("par", par),) if par else ()) + ((("inc", inc),) if inc else ()) \
                 + ((("ali", ali),) if ali else ()) + (("item", m.group(1)),)
         else:
@@ -601,6 +654,12 @@ def _rotular(blocos: list[Bloco]) -> None:
         b.tipo = "dispositivo"
         b.artigo, b.espaco = art, espaco
         b.rotulo = rotulo_dispositivo(b.chave)
+
+    # Vários anexos com articulado próprio (ex.: consolidação de convenções): cada um no seu espaço
+    if len(set(anexos_com_artigos)) > 1 and reg_de:
+        for b in blocos:
+            if b.espaco == "reg":
+                b.espaco = f"anexo:{reg_de}"
 
 
 def _art1_adiante(blocos: list[Bloco], i: int, janela: int = 25) -> bool:
@@ -611,33 +670,61 @@ def _art1_adiante(blocos: list[Bloco], i: int, janela: int = 25) -> bool:
     return False
 
 
+_RE_SO_ROTULO = re.compile(
+    r"[^\s]+(\s+DAS\s+DISPOSI\S+)?\s+([IVXLCDM]+|\d+|[ÚU]NIC[OA]|[A-Z])[º°]?(-[A-Z])?\s*[.:\-–—]?|"
+    r"PARTE\s+(GERAL|ESPECIAL)|LIVRO\s+COMPLEMENTAR", re.I)
+
+
 def _ajustar_estrutura(blocos: list[Bloco]) -> None:
-    """Junta "TÍTULO I" ao nome que vem no parágrafo seguinte; títulos curtos antes de um artigo
+    """Junta "TÍTULO I" ao nome que vem no(s) parágrafo(s) seguinte(s); títulos curtos antes de um artigo
     pertencem a ele; notas soltas logo após um título ficam com o título."""
     for i, b in enumerate(blocos):
         if b.tipo == "estrutura":
             rot = b.vigente or b.crua()
-            if not _RE_ESTRUTURA.match(b.vigente or ""):  # rótulo riscado (ex.: anexo revogado)
+            if not _RE_ESTRUTURA.match(b.vigente or "") and not _RE_ANEXO.match(b.vigente or ""):
                 rot = _espacos(f"{b.crua().split('(')[0]} {' '.join(_RE_NOTA.findall(b.vigente))}")
-            so_rotulo = re.fullmatch(r"[^\s]+(\s+DAS\s+DISPOSI\S+)?\s+([IVXLCDM]+|\d+|[ÚU]NIC[OA]|[A-Z])[º°]?(-[A-Z])?"
-                                     r"\s*[.:\-–—]?", rot, re.I) or re.fullmatch(r"PARTE\s+(GERAL|ESPECIAL)", rot, re.I)
-            if so_rotulo and i + 1 < len(blocos):
-                prox = blocos[i + 1]
-                if prox.tipo == "texto" and prox.vigente and len(prox.vigente) < 150 \
-                        and not re.search(r"[.;:]$", prox.vigente) and not _RE_NOTA.fullmatch(prox.vigente):
-                    rot = f"{rot} {prox.vigente}"
-                    prox.tipo = "estrutura_cont"
-                    prox.artigo = None
+            nucleo = _espacos(_RE_NOTA.sub(" ", rot))
+            if _RE_SO_ROTULO.fullmatch(nucleo):
+                # nome do título nas linhas seguintes (pode ter nota no meio e ocupar 2 linhas em maiúsculas)
+                partes, usados = [], 0
+                for prox in blocos[i + 1:i + 5]:
+                    if prox.tipo != "texto" or not prox.vigente or prox.obsoleto:
+                        if prox.obsoleto:
+                            continue
+                        break
+                    v = prox.vigente
+                    if not _sem_notas(v):  # só nota
+                        prox.tipo, prox.artigo = "estrutura_nota", None
+                        continue
+                    sem_nota = _espacos(_RE_NOTA.sub(" ", v))
+                    maiusc = sem_nota.upper() == sem_nota and len(sem_nota) < 200
+                    curto = len(sem_nota) < 150 and not re.search(r"[;:]$", sem_nota) and \
+                        (not sem_nota.endswith(".") or maiusc)
+                    if not partes and curto or partes and maiusc and usados < 2:
+                        partes.append(v)
+                        usados += 1
+                        prox.tipo, prox.artigo = "estrutura_cont", None
+                        if not maiusc:
+                            break
+                    else:
+                        break
+                if partes:
+                    rot = f"{rot} {' '.join(partes)}"
             b.titulo_estrutura = rot
             # nota da seção ("(Incluído pela EC 132)") não pertence ao próximo artigo
             for prox in blocos[i + 1:i + 3]:
                 if prox.tipo == "texto" and prox.vigente and not _sem_notas(prox.vigente):
                     prox.artigo = None
                     prox.tipo = "estrutura_nota"
-                else:
+                elif prox.tipo not in ("estrutura_cont", "estrutura_nota"):
                     break
             continue
         if b.tipo != "texto" or not b.vigente or len(b.vigente) > 120 or re.search(r"[.;:,]$", b.vigente):
+            continue
+        # tratados: "Artigo 26" / "Pacta sunt servanda" / texto -> o título é do artigo que acabou de abrir
+        ant = next((x for x in reversed(blocos[:i]) if x.vigente and not x.obsoleto), None)
+        if ant is not None and ant.tipo == "dispositivo" and len(ant.chave) == 1 and \
+                re.fullmatch(r"(Art|ART|Artigo|ARTIGO)\.?\s*[\d.]+\s*[º°o]?(-[A-Z])?\.?", ant.vigente.strip()):
             continue
         for prox in blocos[i + 1:i + 4]:
             if prox.obsoleto or not prox.vigente:
@@ -721,6 +808,11 @@ def ler_documento(conteudo: str, url: str, last_modified: str | None = None) -> 
     if blocos and _RE_PREAMBULO.match(blocos[0].crua().lstrip(" |")):
         blocos[0].tipo = "preambulo"
         corpo = blocos[1:]
+    corpo = _juntar_fragmentos(corpo)
+    if blocos and blocos[0].tipo == "preambulo":
+        blocos = [blocos[0]] + corpo
+    else:
+        blocos = corpo
     _rotular(corpo)
     for b in corpo:
         _classificar_notas(b)
