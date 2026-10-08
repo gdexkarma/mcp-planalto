@@ -53,11 +53,12 @@ _RE_LINKS_SOLTOS = re.compile(
 
 # Rótulos. O sufixo de letra ("10-A", "22A", "359-M-A") é aceito colado ao número;
 # "Art. 7º - O lucro" e "Art. 46 -A renda" NÃO têm sufixo (dash seguido de palavra).
-_SUFIXO = (r"(?:(?:(?<=[\dº°o])-|(?<=\d))(?P<suf>[A-Z]{1,2}(?:-[A-Z])?)(?![A-Za-zÀ-ÿ])(?!\s+[a-zà-ÿ]))?")
+_SUFIXO = (r"(?:(?:(?<=[\dº°o])\s?-|(?<=\d))(?P<suf>[A-Z]{1,2}(?:-[A-Z])?)(?![A-Za-zÀ-ÿ])(?!\s+[a-zà-ÿ]))?")
 _RE_ART = re.compile(
     r"^(?:Art(?:igo)?|ART(?:IGO)?|A?rt(?=\.))(?:\s*\.){0,2}\s*(?P<num>\d{1,3}(?:\.\d{3})+|\d+)\s*(?:º|°|o(?=\W))?" + _SUFIXO
 )
-_RE_PAR = re.compile(r"^§\s*(?P<num>\d+)\s*(?:º|°|o(?=\W))?" + _SUFIXO)
+_RE_PAR = re.compile(r"^§\s*(?P<num>\d+)(?!\d)\s*(?:º|°|o(?=\W))?" + _SUFIXO
+                     + r"(?!\s*(?:d[oa]s?|deste|desta|dest[ea]s|n[oa]s?)\s)")
 _RE_PU = re.compile(r"^Par[áa]grafo\s+[úu]nico", re.I)
 _RE_INC = re.compile(r"^([IVXLC]+)(?:\s*-\s*([A-Z])(?=\s*[-–—]))?\s*[-–—]")
 _RE_ALI = re.compile(r"^([a-z])(?:\s*-\s*([A-Z0-9]))?\s*\)")
@@ -102,7 +103,8 @@ _RE_INICIO_EMENTA = re.compile(
 )
 _RE_ALTERADOR = re.compile(
     r"passa(m)?\s+a\s+vigorar|acrescid[oa]s?\s+d|com\s+as\s+seguintes\s+altera|com\s+a\s+seguinte\s+reda|"
-    r"seguintes?\s+(arts?\.|artigos?|dispositivos?|par[áa]grafos?|incisos?)|vigorar\s+acrescid",
+    r"seguintes?\s+(arts?\.|artigos?|dispositivos?|par[áa]grafos?|incisos?)|vigorar\s+acrescid|"
+    r"passa(m)?\s+a\s+ter\s+a\s+seguinte|a\s+seguinte\s+reda[çc][ãa]o",
     re.I,
 )
 
@@ -131,7 +133,7 @@ class Bloco:
         if self.tipo == "estrutura" and self.titulo_estrutura:
             return self.titulo_estrutura
         if self.revogado:
-            nota = next((n for n in self.notas if "revog" in n.lower()), "(Revogado)")
+            nota = next((n for n in self.notas if re.search(r"revog|suprimid|sustad", n, re.I)), "(Revogado)")
             return f"{self.rotulo_original()} {nota}".strip()
         t = self.vigente
         if not notas:
@@ -552,7 +554,8 @@ def _juntar_fragmentos(blocos: list[Bloco]) -> list[Bloco]:
         if out and t and " | " not in t and not _inicio_dispositivo(t) and not _RE_ESTRUTURA.match(t):
             ant = out[-1]
             ta = ant.crua()
-            continua = re.match(r"^([a-zà-ÿ]|[\"'“”]\s*[a-zà-ÿ(]|[,;)])", t) and not re.match(r"^[a-z]\)", t)
+            continua = (re.match(r"^([a-zà-ÿ]|[\"'“”]\s*[a-zà-ÿ(]|[,;)])", t) and not re.match(r"^[a-z]\)", t)) or \
+                re.match(r"^§\s*\d+(?!\d)\s*[º°o]?\s+(?:d[oa]s?|deste|desta)\s", t)
             if continua and ta and " | " not in ta and not re.search(r"[.;:!?]\s*$|\(NR\)\s*$", ta) and \
                     not _RE_ESTRUTURA.match(ta) and not _RE_PREAMBULO.match(ta):
                 ant.vigente = _espacos(f"{ant.vigente} {b.vigente}")
@@ -567,6 +570,8 @@ def _juntar_fragmentos(blocos: list[Bloco]) -> list[Bloco]:
 def _rotular(blocos: list[Bloco]) -> None:
     """Atribui espaço, artigo e dispositivo (art./§/inciso/alínea/item) a cada bloco."""
     art = par = inc = ali = None
+    ctx_vivo = ctx_todos = (None, None, None)
+    ultimo_corpo = None  # último artigo do articulado principal
     espaco = ""
     em_citacao = False
     alterador = False  # o artigo corrente introduz texto de outra norma
@@ -604,6 +609,7 @@ def _rotular(blocos: list[Bloco]) -> None:
                 rodape, espaco, art = False, "reg", None
                 reg_de = anexo_atual or "I"
                 par = inc = ali = None
+                ctx_vivo = ctx_todos = (None, None, None)
                 if titulo_reg:
                     b.tipo, b.espaco = "estrutura", espaco
                     continue
@@ -651,12 +657,25 @@ def _rotular(blocos: list[Bloco]) -> None:
                 anexo_atual = ident
                 espaco, art = f"anexo:{ident}", None
             par = inc = ali = None
+            ctx_vivo = ctx_todos = (None, None, None)
             alterador = False
             b.espaco = espaco
             continue
         # ---------------------------------------------------------- dispositivos
+        # Inciso/§ vivo não pode herdar o pai de uma redação toda riscada (o § antigo riscado seguido do
+        # inciso vigente): blocos vivos usam o contexto dos vivos; os riscados, o de todos.
+        # dispositivo revogado com nota ("Parágrafo único (Revogado pela Lei X)") continua existindo: conta
+        vivo = bool((b.vigente or "").strip())
+        par, inc, ali = ctx_vivo if vivo else ctx_todos
         if m:
             num = m.group("num").replace(".", "")
+            if espaco == "anexo:PROTOCOLO" and num != "1" and anexo_atual not in anexos_com_artigos and \
+                    ultimo_corpo and int(num) == _ordem(ultimo_corpo)[0] + 1 and not m.group("suf"):
+                # "Protocolo"/"Anexo" que era só rubrica: o artigo seguinte continua a numeração do corpo
+                for x in blocos[max(0, i - 4):i]:
+                    if x.espaco == espaco and x.tipo == "estrutura":
+                        x.tipo, x.espaco = "texto", ""
+                espaco = ""
             if espaco.startswith("anexo:") and num == "1":
                 anexos_com_artigos.append(anexo_atual)
                 if not reg_de:
@@ -673,10 +692,12 @@ def _rotular(blocos: list[Bloco]) -> None:
         elif _RE_PU.match(base) and art:
             par, inc, ali = "unico", None, None
             b.chave = (("art", art), ("par", par))
+            alterador = alterador or bool(_RE_ALTERADOR.search(base))
         elif (m := _RE_INC.match(base)) and art and romano_para_int(m.group(1)):
             inc = str(romano_para_int(m.group(1))) + (m.group(2) or "").lower()
             ali = None
             b.chave = (("art", art),) + ((("par", par),) if par else ()) + (("inc", inc),)
+            alterador = alterador or bool(_RE_ALTERADOR.search(base))
         elif (m := _RE_ALI.match(base)) and art:
             # alínea logo abaixo do caput (sem inciso/§) também existe: LINDB art. 15, DL 3.365 art. 5º
             ali = m.group(1) + (m.group(2) or "").lower()
@@ -690,6 +711,13 @@ def _rotular(blocos: list[Bloco]) -> None:
         b.tipo = "dispositivo"
         b.artigo, b.espaco = art, espaco
         b.rotulo = rotulo_dispositivo(b.chave)
+        if espaco == "" and len(b.chave) == 1:
+            ultimo_corpo = art
+        ctx_todos = (par, inc, ali)
+        if vivo:
+            ctx_vivo = ctx_todos
+        elif len(b.chave) == 1:
+            ctx_vivo = (None, None, None)  # artigo novo (mesmo riscado): o contexto anterior não vale mais
 
     # Vários anexos com articulado próprio (ex.: consolidação de convenções): cada um no seu espaço
     if len(set(anexos_com_artigos)) > 1 and reg_de:
@@ -719,7 +747,7 @@ def _ajustar_estrutura(blocos: list[Bloco]) -> None:
             rot = b.vigente or b.crua()
             if not _RE_ESTRUTURA.match(b.vigente or "") and not _RE_ANEXO.match(b.vigente or ""):
                 rot = _espacos(f"{b.crua().split('(')[0]} {' '.join(_RE_NOTA.findall(b.vigente))}")
-            nucleo = _espacos(_RE_NOTA.sub(" ", rot))
+            nucleo = _espacos(_RE_LINKS_SOLTOS.sub(" ", _RE_NOTA.sub(" ", rot)))
             if _RE_SO_ROTULO.fullmatch(nucleo):
                 # nome do título nas linhas seguintes (pode ter nota no meio e ocupar 2 linhas em maiúsculas)
                 partes, usados = [], 0
@@ -733,8 +761,8 @@ def _ajustar_estrutura(blocos: list[Bloco]) -> None:
                         prox.tipo, prox.artigo = "estrutura_nota", None
                         continue
                     sem_nota = _espacos(_RE_NOTA.sub(" ", v))
-                    maiusc = sem_nota.upper() == sem_nota and len(sem_nota) < 200
-                    curto = len(sem_nota) < 150 and not re.search(r"[;:]$", sem_nota) and \
+                    maiusc = sem_nota.upper() == sem_nota and len(sem_nota) < 400
+                    curto = (len(sem_nota) < 150 or maiusc) and not re.search(r"[;:]$", sem_nota) and \
                         (not sem_nota.endswith(".") or maiusc)
                     if not partes and curto or partes and maiusc and usados < 2:
                         partes.append(v)
@@ -775,6 +803,37 @@ def _ajustar_estrutura(blocos: list[Bloco]) -> None:
                 break
 
 
+_RE_NOTA_SOLTA = re.compile(
+    r"^\(?\s*(?:Revogad|Suprimid|Sustad|Vetad)[oa]s?\b[^()]*\)?\s*[:.;]?\s*"
+    r"(?:\((?:Vig[êe]ncia|Produ[çc][ãa]o de efeitos?)\)\s*)?$", re.I)
+
+
+def _esconder_superadas(blocos: list[Bloco]) -> None:
+    """Esconde do modo vigente o que o Planalto deixou sem risco mas já não vale:
+    - dispositivo "(Revogado pela MP X)" seguido, no mesmo artigo, do mesmo dispositivo com texto vivo (a MP
+      caducou ou a revogação foi desfeita);
+    - nota solta ("(Suprimido pelo DL 34)", "Revogado pela Lei X)") que precede a redação viva ou repete a
+      nota anterior (ela se refere a uma redação riscada)."""
+    n = len(blocos)
+    for i, b in enumerate(blocos):
+        if b.obsoleto:
+            continue
+        if b.tipo == "dispositivo" and b.revogado and b.chave:
+            for c in blocos[i + 1:i + 120]:
+                if c.artigo != b.artigo or c.espaco != b.espaco:
+                    break
+                if c.chave == b.chave and not c.obsoleto and not c.revogado and c.vigente:
+                    b.obsoleto = True
+                    break
+        elif b.tipo == "texto" and not b.chave and b.vigente and _RE_NOTA_SOLTA.match(b.vigente.strip()):
+            prox = next((c for c in blocos[i + 1:min(n, i + 6)] if not c.obsoleto), None)
+            ant = next((c for c in reversed(blocos[max(0, i - 3):i]) if not c.obsoleto), None)
+            if prox is not None and prox.tipo == "dispositivo" and prox.vigente and not prox.revogado:
+                b.obsoleto = True
+            elif ant is not None and _espacos(ant.vigente).rstrip(":;.) ") == _espacos(b.vigente).rstrip(":;.) "):
+                b.obsoleto = True
+
+
 def _sem_notas(t: str) -> str:
     t = _RE_NOTA.sub(" ", t)
     t = _RE_LINKS_SOLTOS.sub(" ", t)
@@ -787,6 +846,13 @@ def _classificar_notas(b: Bloco) -> None:
     if not b.vigente.strip():
         if b.completo.strip():
             b.obsoleto = True
+        return
+    solta = b.vigente.strip()
+    if b.tipo == "dispositivo" and _RE_NOTA_SOLTA.match(solta) and re.search(r"revog|suprimid|sustad", solta, re.I):
+        # só a nota sobrou do dispositivo ("Revogado pela Lei X) (Vigência)", "(Suprimido pelo DL 34)")
+        nota = re.sub(r"[:;.]$", "", re.sub(r"\s*\((?:Vig[êe]ncia|Produ[çc][ãa]o de efeitos?)\)\s*$", "", solta)).strip()
+        nota = "(" + nota.strip("() ") + ")"
+        b.revogado, b.notas = True, [nota] + [n for n in b.notas if n != nota]
         return
     conteudo = _sem_notas(b.vigente)
     rot = re.sub(r"[\s|.;:,\-–—*()]+", "", b.rotulo_original())
@@ -856,6 +922,7 @@ def ler_documento(conteudo: str, url: str, last_modified: str | None = None) -> 
     _rotular(corpo)
     for b in corpo:
         _classificar_notas(b)
+    _esconder_superadas(corpo)
     _ajustar_estrutura(corpo)
     arquivos = set()
     for a in doc.iter("a"):

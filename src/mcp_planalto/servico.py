@@ -759,6 +759,13 @@ class Legislacao:
                 return cab
             if ctx := _contexto_superior(doc, blocos):
                 cab["contexto"] = ctx
+            vivos = collections.Counter(b.chave for b in blocos if b.chave and not b.obsoleto and not b.revogado
+                                        and b.vigente and b.tipo == "dispositivo")
+            dup = [rotulo_dispositivo(k) for k, q in vivos.items() if q > 1]
+            if dup:
+                cab["aviso_duplicidade"] = (
+                    "O Planalto mostra mais de uma redação sem risco para: " + ", ".join(dup[:5]) + ". Em geral vale a "
+                    "última (com a nota 'Redação dada' mais recente); confira no DOU.")
         if termo:
             base = blocos if blocos is not None else doc.blocos
             sub = Documento(doc.url, doc.epigrafe, doc.ementa, doc.notas_gerais, base)
