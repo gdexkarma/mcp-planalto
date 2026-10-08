@@ -429,9 +429,13 @@ async def sincronizar_catalogo(
     return {"status": "sincronização iniciada em segundo plano", **(await _rodar(s.status))}
 
 
+DETALHES_A_CADA = 3 * 24 * 3600  # carga incremental do Senado: só as normas novas desde a última
+
+
 def _auto_sincronizar() -> None:
     """Ao iniciar: monta o catálogo se a carga completa nunca terminou (inclusive se foi interrompida);
-    senão, revalida os quadros do ano corrente."""
+    senão, revalida os quadros do ano corrente. Se a carga de detalhes do Senado já foi feita uma vez
+    (`sincronizar --detalhes`) e tem mais de 3 dias, completa os detalhes das normas novas."""
     s = servico()
     if not s.config.auto_sync:
         return
@@ -447,6 +451,11 @@ def _auto_sincronizar() -> None:
             ultimo = float(s.db.meta("recentes_em", "0"))
             if time.time() - ultimo > 6 * 3600:
                 s.atualizar_recentes()
+        detalhes = float(s.db.meta("detalhes_em", "0") or 0)
+        if detalhes and time.time() - detalhes > DETALHES_A_CADA:
+            log.info("Atualizando detalhes do Senado das normas novas...")
+            r = s.sincronizar_detalhes(limite=3000)
+            log.info("Detalhes do Senado: %s normas processadas", r.get("processadas"))
     except Exception:
         log.exception("Falha na sincronização automática")
     finally:

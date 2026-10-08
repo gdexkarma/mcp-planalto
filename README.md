@@ -73,6 +73,23 @@ Em `claude_desktop_config.json`:
 
 Se instalou com `pip`, use `"command": "mcp-planalto"` e `"args": []`.
 
+**Windows sem Git ou com Controle de Aplicativo** (política que bloqueia `mcp-planalto.exe`): instale pelo `.zip` e
+chame o `python.exe` do ambiente da ferramenta, que costuma ser permitido:
+
+```powershell
+uv tool install https://github.com/gdexkarma/mcp-planalto/archive/refs/heads/claude/mcp-planalto-legislation-d1esif.zip
+& "$env:APPDATA\uv\tools\mcp-planalto\Scripts\python.exe" -m mcp_planalto sincronizar
+```
+
+```json
+"planalto": {
+  "command": "C:\\Users\\SEU_USUARIO\\AppData\\Roaming\\uv\\tools\\mcp-planalto\\Scripts\\python.exe",
+  "args": ["-m", "mcp_planalto"]
+}
+```
+
+Para atualizar: feche o Claude Desktop e rode o mesmo `uv tool install` com `--force`.
+
 ### Servidor HTTP (uso remoto ou por várias pessoas)
 
 ```bash
@@ -109,7 +126,7 @@ mcp-planalto sincronizar --detalhes --tipos DEC --desde-ano 2000   # decretos, s
 | camada "relacionada" do `mapear_tema` e contagens por tema | `consultar_norma`, `historico_alteracoes`, `verificar_atualizacao` (buscam no Senado só a norma consultada, na hora) |
 | `novidades_legislativas` com tema rápido (sem ele, até 60 consultas ao Senado por chamada, ~30 s) | camada "alteradora" do `mapear_tema` (consulta só as normas-núcleo) |
 
-Depois da primeira carga, rodar de novo (por exemplo, uma vez por semana) processa só as normas que entraram no catálogo desde então, em poucos minutos.
+Depois da primeira carga completa, **o próprio servidor mantém os detalhes em dia**: ao iniciar, se a última carga tiver mais de 3 dias, ele processa em segundo plano só as normas que entraram no catálogo desde então (poucos minutos). Rodar o comando à mão continua funcionando, mas não é necessário.
 
 ### Espaço em disco e tempo
 

@@ -2,7 +2,7 @@
 
 MCP_PLANALTO_HOME        diretório de dados (padrão: ~/.mcp-planalto)
 MCP_PLANALTO_CACHE_HORAS validade do cache HTTP de páginas de texto (padrão: 24)
-MCP_PLANALTO_AUTO_SYNC   "0" desliga a atualização automática do catálogo ao iniciar
+MCP_PLANALTO_AUTO_SYNC   "0" desliga a atualização automática do catálogo (e dos detalhes do Senado) ao iniciar
 """
 
 from __future__ import annotations
